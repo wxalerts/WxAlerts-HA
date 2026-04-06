@@ -1,0 +1,41 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "WxAlerts — Select State",
+        "description": "Select the state you want to monitor NWS alerts for. You can add zones from multiple states after setup.",
+        "data": {
+          "state": "State"
+        }
+      },
+      "county": {
+        "title": "WxAlerts — Select Zones",
+        "description": "Search for a county to find its NWS zones. Currently monitoring **{zone_count}** zone(s): {current_zones}",
+        "data": {
+          "county": "County name (optional, leave blank to see all zones for {state})",
+          "selected_zones": "Zones to add",
+          "add_more": "Add zones from another state"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to reach the WxAlerts API. Check your internet connection and try again.",
+      "no_zones_found": "No zones found for that county. Try a different search term."
+    },
+    "abort": {
+      "already_configured": "WxAlerts is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "WxAlerts — Manage Zones",
+        "description": "Currently monitoring **{zone_count}** zone(s). Uncheck zones to remove them.",
+        "data": {
+          "keep_zones": "Active zones",
+          "add_more": "Add more zones"
+        }
+      }
+    }
+  }
+}
