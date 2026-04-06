@@ -10,6 +10,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     API_BASE_URL,
@@ -27,12 +28,9 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-_HEADERS = {"User-Agent": "WxAlerts-HA/1.0 (Home Assistant Integration)"}
-
-
 async def _fetch_states(session: aiohttp.ClientSession) -> list[str]:
     """Fetch available states from WxAlerts API."""
-    async with session.get(f"{API_BASE_URL}{API_STATES_ENDPOINT}", headers=_HEADERS) as resp:
+    async with session.get(f"{API_BASE_URL}{API_STATES_ENDPOINT}") as resp:
         resp.raise_for_status()
         data = await resp.json()
         return data if isinstance(data, list) else data.get("states", [])
@@ -45,7 +43,6 @@ async def _fetch_counties(
     async with session.get(
         f"{API_BASE_URL}{API_COUNTIES_ENDPOINT}",
         params={"state": state},
-        headers=_HEADERS,
     ) as resp:
         resp.raise_for_status()
         data = await resp.json()
@@ -62,7 +59,7 @@ async def _search_zones(
     if county:
         params["county"] = county
     async with session.get(
-        f"{API_BASE_URL}{API_SEARCH_ENDPOINT}", params=params, headers=_HEADERS
+        f"{API_BASE_URL}{API_SEARCH_ENDPOINT}", params=params
     ) as resp:
         resp.raise_for_status()
         data = await resp.json()
@@ -88,8 +85,8 @@ class WxAlertsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         try:
-            async with aiohttp.ClientSession() as session:
-                self._states = await _fetch_states(session)
+            session = async_get_clientsession(self.hass)
+            self._states = await _fetch_states(session)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Failed to fetch states from WxAlerts API")
             errors["base"] = "cannot_connect"
@@ -144,21 +141,20 @@ class WxAlertsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return self._create_entry()
 
             # Perform search
+            session = async_get_clientsession(self.hass)
             if county_search:
                 try:
-                    async with aiohttp.ClientSession() as session:
-                        self._available_zones = await _search_zones(
-                            session, self._selected_state, county_search
-                        )
+                    self._available_zones = await _search_zones(
+                        session, self._selected_state, county_search
+                    )
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("Failed to search zones")
                     errors["base"] = "cannot_connect"
             else:
                 try:
-                    async with aiohttp.ClientSession() as session:
-                        self._available_zones = await _fetch_counties(
-                            session, self._selected_state
-                        )
+                    self._available_zones = await _fetch_counties(
+                        session, self._selected_state
+                    )
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("Failed to fetch counties")
                     errors["base"] = "cannot_connect"
