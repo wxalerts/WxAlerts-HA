@@ -27,9 +27,12 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+_HEADERS = {"User-Agent": "WxAlerts-HA/1.0 (Home Assistant Integration)"}
+
+
 async def _fetch_states(session: aiohttp.ClientSession) -> list[str]:
     """Fetch available states from WxAlerts API."""
-    async with session.get(f"{API_BASE_URL}{API_STATES_ENDPOINT}") as resp:
+    async with session.get(f"{API_BASE_URL}{API_STATES_ENDPOINT}", headers=_HEADERS) as resp:
         resp.raise_for_status()
         data = await resp.json()
         return data if isinstance(data, list) else data.get("states", [])
@@ -42,6 +45,7 @@ async def _fetch_counties(
     async with session.get(
         f"{API_BASE_URL}{API_COUNTIES_ENDPOINT}",
         params={"state": state},
+        headers=_HEADERS,
     ) as resp:
         resp.raise_for_status()
         data = await resp.json()
@@ -58,7 +62,7 @@ async def _search_zones(
     if county:
         params["county"] = county
     async with session.get(
-        f"{API_BASE_URL}{API_SEARCH_ENDPOINT}", params=params
+        f"{API_BASE_URL}{API_SEARCH_ENDPOINT}", params=params, headers=_HEADERS
     ) as resp:
         resp.raise_for_status()
         data = await resp.json()
