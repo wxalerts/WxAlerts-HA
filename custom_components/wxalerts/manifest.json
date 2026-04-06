@@ -5,7 +5,7 @@
   "documentation": "https://github.com/wxalerts/WxAlerts-HA",
   "issue_tracker": "https://github.com/wxalerts/WxAlerts-HA/issues",
   "codeowners": ["@wxalerts"],
-  "requirements": ["paho-mqtt==1.6.1"],
+  "requirements": ["paho-mqtt>=2.0.0"],
   "iot_class": "cloud_push",
   "config_flow": true
 }
