@@ -12,7 +12,7 @@ MQTT_KEEPALIVE = 60
 MQTT_RECONNECT_DELAY = 5
 
 # WxAlerts REST API
-API_BASE_URL = "https://wxalerts.org"
+API_BASE_URL = "https://api.wxalerts.org"
 API_STATES_ENDPOINT = "/alerts/zone/states"
 API_COUNTIES_ENDPOINT = "/alerts/zone/counties"
 API_SEARCH_ENDPOINT = "/alerts/zone/search"
