@@ -1,0 +1,52 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "WxAlerts",
+        "description": "Pick the Home Assistant zones to watch. Each zone is resolved to its county for NWS alerts and to a geohash box for GLM lightning.",
+        "data": {
+          "zones": "Zones to watch",
+          "enable_alerts": "NWS alerts",
+          "enable_glm": "GLM lightning"
+        }
+      }
+    },
+    "error": {
+      "no_zones": "Select at least one zone.",
+      "no_locations": "None of the selected zones have usable coordinates.",
+      "no_same_codes": "No selected zone resolved to a US county, so alerts cannot be delivered. Lightning-only setups should disable NWS alerts."
+    },
+    "abort": {
+      "already_configured": "WxAlerts is already configured. Adjust zones in the integration options."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "WxAlerts options",
+        "description": "Zones are re-resolved when you save.",
+        "data": {
+          "zones": "Zones to watch",
+          "enable_alerts": "NWS alerts",
+          "enable_glm": "GLM lightning",
+          "glm_precision": "Lightning box size (geohash characters; 3 ≈ regional, 4 ≈ county, 5 ≈ neighborhood)",
+          "glm_window_minutes": "Lightning window (minutes)",
+          "phenomenon_sensors": "Per-phenomenon binary sensors (tornado, severe thunderstorm, …)"
+        }
+      }
+    },
+    "error": {
+      "no_locations": "None of the selected zones have usable coordinates."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "active_alert": { "name": "Active alert" }
+    },
+    "sensor": {
+      "highest_severity": { "name": "Highest severity" },
+      "alert_count": { "name": "Active alerts" },
+      "lightning_flashes": { "name": "Lightning flashes" }
+    }
+  }
+}
