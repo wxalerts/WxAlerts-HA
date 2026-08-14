@@ -14,6 +14,7 @@ from .const import (
     LOC_GEOHASH,
     LOC_NAME,
     LOC_SAME,
+    LOC_ZONE_ENTITY,
     SIGNAL_ALERTS_UPDATED,
     SIGNAL_CONNECTION,
     SIGNAL_GLM_UPDATED,
@@ -41,7 +42,14 @@ class WxAlertsLocationEntity(Entity):
         self.glm_prefix: str = geohash[: coordinator.glm_precision]
 
         entry_id = coordinator.entry.entry_id
-        device_key = self.same or self.glm_prefix or location.get(LOC_NAME, "unknown")
+        # Counties group zones onto one device. A zone with no county falls
+        # back to its zone id rather than its geohash prefix, which would move
+        # the whole device whenever the lightning box size changed.
+        device_key = (
+            self.same
+            or location.get(LOC_ZONE_ENTITY)
+            or location.get(LOC_NAME, "unknown")
+        )
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{entry_id}_{device_key}")},
             name=f"WxAlerts {location.get(LOC_NAME)}",

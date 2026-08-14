@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.1
+
+Fixes entity identity, found while testing the 0.2.0 install end to end.
+
+- The lightning sensor was identified by its geohash prefix, which is
+  derived from the box-size **option**. Changing the box size therefore
+  orphaned the sensor and created a `_2` duplicate alongside it, silently
+  breaking any dashboard card or automation pointing at the original. It is
+  now identified by the zone, which does not move.
+- Every configured zone now gets a lightning sensor. Zones were previously
+  deduplicated by geohash box, so a second zone sharing a box with the first
+  got no lightning sensor at all. Two zones in one box report the same count.
+- A zone with no county no longer keys its **device** on the geohash prefix
+  either, for the same reason.
+
+Anyone who installed 0.2.0 should remove and re-add the integration; the
+lightning entity's identity changed, so the old one lingers as unavailable.
+
 ## 0.2.0
 
 A rewrite. The integration is now configured from Home Assistant **zones**

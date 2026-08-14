@@ -20,8 +20,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import WxAlertsConfigEntry
 from .const import (
     LOC_COUNTY,
+    LOC_GEOHASH,
     LOC_NAME,
     LOC_SAME,
+    LOC_ZONE_ENTITY,
     SEVERITY_NONE,
     SEVERITY_ORDER,
 )
@@ -48,13 +50,13 @@ async def async_setup_entry(
             entities.append(AlertCountSensor(coordinator, location))
 
     if coordinator.enable_glm:
-        seen_prefix: set[str] = set()
+        # One per configured zone, not one per geohash box. Two zones sharing
+        # a box report the same count, which is honest; deduplicating by box
+        # instead would leave the second zone with no lightning sensor at all,
+        # and would tie entity identity to a setting the user can change.
         for location in coordinator.locations:
-            prefix = (location.get("geohash") or "")[: coordinator.glm_precision]
-            if not prefix or prefix in seen_prefix:
-                continue
-            seen_prefix.add(prefix)
-            entities.append(LightningCountSensor(coordinator, location))
+            if location.get(LOC_GEOHASH):
+                entities.append(LightningCountSensor(coordinator, location))
 
     async_add_entities(entities)
 
@@ -138,9 +140,11 @@ class LightningCountSensor(WxAlertsLocationEntity, SensorEntity):
         self, coordinator: WxAlertsCoordinator, location: dict[str, Any]
     ) -> None:
         super().__init__(coordinator, location)
-        self._attr_unique_id = (
-            f"{coordinator.entry.entry_id}_glm_{self.glm_prefix}"
-        )
+        # Keyed on the zone, never on the geohash prefix: the box size is an
+        # option, and keying identity on it renamed the entity to _2 and
+        # orphaned the original every time someone changed it.
+        zone = location.get(LOC_ZONE_ENTITY) or location.get(LOC_GEOHASH)
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_glm_{zone}"
 
     @property
     def native_value(self) -> int:

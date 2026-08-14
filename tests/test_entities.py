@@ -229,6 +229,66 @@ async def test_lightning_sensor_counts_flashes(hass, setup_integration):
     assert state.attributes["unit_of_measurement"] == "flashes"
 
 
+async def test_lightning_identity_survives_a_box_size_change(
+    hass, config_entry, mock_feed_client, enable_custom_integrations
+):
+    """The box size is an option. Deriving the unique_id from it renamed the
+    entity to _2 and orphaned the original every time someone changed it,
+    silently breaking any card or automation pointing at it."""
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    before = registry.async_get(LIGHTNING).unique_id
+
+    hass.config_entries.async_update_entry(
+        config_entry, options={**config_entry.options, CONF_GLM_PRECISION: 5}
+    )
+    await hass.async_block_till_done()
+
+    assert registry.async_get(LIGHTNING).unique_id == before
+    assert hass.states.get(f"{LIGHTNING}_2") is None
+    # The box it reads really did change; only the identity held still.
+    config_entry.runtime_data._handle_connection(True)
+    await hass.async_block_till_done()
+    assert hass.states.get(LIGHTNING).attributes["geohash"] == "dj6n7"
+
+
+async def test_every_zone_gets_a_lightning_sensor(
+    hass, mock_feed_client, enable_custom_integrations
+):
+    """Two zones in one geohash box must both get a sensor. Deduplicating by
+    box left the second zone with none at all."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    neighbour = {
+        **LOCATION_SANTA_ROSA,
+        "zone_entity_id": "zone.work",
+        "name": "Work",
+        "geohash": "dj6n8",  # same dj6 box, different leaf
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=DOMAIN,
+        data={
+            CONF_ZONES: ["zone.home", "zone.work"],
+            CONF_LOCATIONS: [LOCATION_SANTA_ROSA, neighbour],
+            CONF_ENABLE_ALERTS: False,
+            CONF_ENABLE_GLM: True,
+        },
+        options={CONF_GLM_PRECISION: 3},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    entry.runtime_data._handle_connection(True)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(LIGHTNING) is not None
+    assert hass.states.get("sensor.wxalerts_work_lightning_flashes") is not None
+
+
 async def test_lightning_does_not_touch_the_alert_entities(hass, setup_integration):
     await feed(hass, setup_integration, TOPIC_GLM_LEAF, encode(GLM_BURST))
 
