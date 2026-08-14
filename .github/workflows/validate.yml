@@ -33,6 +33,9 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+          # The deps are test-only, so they do not live in a requirements.txt
+          # that setup-python would find on its own.
+          cache-dependency-path: requirements-test.txt
       - run: pip install -r requirements-test.txt
       # The live tests are deselected by pytest.ini; CI must never depend on
       # the weather, or on the broker being reachable from a runner.
