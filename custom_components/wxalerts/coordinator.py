@@ -65,6 +65,14 @@ _BACKOFF_INITIAL = 2.0
 _BACKOFF_MAX = 300.0
 _BACKOFF_RESET_AFTER = 120.0  # connection considered stable after this
 
+# Subscribing replays every live hazard as a retained message. That burst is
+# current state, not news, and the feed's own guidance is not to notify on it
+# — otherwise every HA restart re-announces every warning in effect. Alerts
+# arriving within this window of a connection update entities but fire no
+# event. The cost is that a hazard issued during those seconds is silent on
+# the event bus; its binary_sensor still turns on.
+_PRIMING_SECONDS = 5.0
+
 
 @dataclass
 class FeedConfig:
@@ -200,6 +208,8 @@ class WxAlertsCoordinator:
         # Topics we have already fired the HA event for (events fire per new
         # hazard, not per update — CON/EXT on the same topic stays quiet).
         self._event_fired: set[str] = set()
+        # Monotonic deadline for the retained-burst window; see _PRIMING_SECONDS.
+        self._priming_until: float = 0.0
 
         # Lightning, keyed by subscribed geohash prefix -> recent flashes.
         self._flashes: dict[str, deque[dict[str, Any]]] = {}
@@ -277,6 +287,10 @@ class WxAlertsCoordinator:
     @callback
     def _handle_connection(self, connected: bool) -> None:
         self.connected = connected
+        if connected:
+            # A fresh subscription replays the retained set; hold events off
+            # until it has landed.
+            self._priming_until = time.monotonic() + _PRIMING_SECONDS
         async_dispatcher_send(
             self.hass, f"{SIGNAL_CONNECTION}_{self.entry.entry_id}", connected
         )
@@ -311,9 +325,13 @@ class WxAlertsCoordinator:
 
         # An HA event per *new* hazard preserves the distinction between "a
         # second tornado warning" and "the same one updated", which state
-        # changes cannot.
+        # changes cannot. Hazards already in effect when we connected are
+        # recorded as seen but announced to nobody.
         if is_new and topic not in self._event_fired:
             self._event_fired.add(topic)
+            if time.monotonic() < self._priming_until:
+                _LOGGER.debug("Retained hazard on %s; not firing an event", topic)
+                return
             self.hass.bus.async_fire(
                 EVENT_ALERT,
                 {

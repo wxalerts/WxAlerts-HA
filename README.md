@@ -41,6 +41,13 @@ Trigger automations on the event, not on state changes — the event
 preserves the difference between "a second tornado warning" and "the same
 one updated", which a state machine cannot.
 
+Hazards already in effect when the integration connects arrive as retained
+messages and fire **no** event: they populate every entity, but they are
+current state rather than news, and announcing them would re-notify you of
+every live warning each time Home Assistant restarts. The flip side is
+that a hazard issued during the first few seconds of a connection updates
+the sensors without firing an event.
+
 ```yaml
 automation:
   - alias: Tornado warning announcement

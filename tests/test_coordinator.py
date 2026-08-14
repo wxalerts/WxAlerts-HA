@@ -280,6 +280,72 @@ async def test_alert_updated_to_cancelled_clears_without_a_tombstone(hass):
 # ---------------------------------------------------------------------------
 
 
+async def test_the_retained_burst_fires_no_events(hass):
+    """Subscribing replays every live hazard. Announcing those would mean a
+    tornado warning re-notifying on every Home Assistant restart."""
+    coordinator = make_coordinator(hass)
+    events = async_capture_events(hass, EVENT_ALERT)
+
+    coordinator._handle_connection(True)  # opens the priming window
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    await coordinator._handle_message(TOPIC_SEVERE, encode(SEVERE_ALERT))
+    await hass.async_block_till_done()
+
+    assert events == []
+    # ...but the state is fully populated, which is the point of retention.
+    assert len(coordinator.alerts_for(SAME_SANTA_ROSA)) == 2
+    assert coordinator.highest_severity(SAME_SANTA_ROSA) == "Extreme"
+
+
+async def test_a_hazard_after_the_burst_fires_normally(hass):
+    coordinator = make_coordinator(hass)
+    events = async_capture_events(hass, EVENT_ALERT)
+
+    coordinator._handle_connection(True)
+    await coordinator._handle_message(TOPIC_SEVERE, encode(SEVERE_ALERT))  # retained
+
+    # The burst has landed; anything after this is genuinely new.
+    coordinator._priming_until = 0.0
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    await hass.async_block_till_done()
+
+    assert [event.data["event"] for event in events] == ["Tornado Warning"]
+
+
+async def test_a_retained_hazard_is_not_announced_later_as_new(hass):
+    """Suppressed-at-connect must still count as seen, or the next CON update
+    would announce it after the window closes."""
+    coordinator = make_coordinator(hass)
+    events = async_capture_events(hass, EVENT_ALERT)
+
+    coordinator._handle_connection(True)
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    coordinator._priming_until = 0.0
+    await coordinator._handle_message(
+        TOPIC_TORNADO, encode({**TORNADO_ALERT, "action": "CON"})
+    )
+    await hass.async_block_till_done()
+
+    assert events == []
+
+
+async def test_reconnecting_does_not_re_announce_live_hazards(hass):
+    """A dropped connection replays the whole retained set on resubscribe."""
+    coordinator = make_coordinator(hass)
+    events = async_capture_events(hass, EVENT_ALERT)
+
+    coordinator._handle_connection(True)
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    coordinator._priming_until = 0.0
+
+    coordinator._handle_connection(False)
+    coordinator._handle_connection(True)
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    await hass.async_block_till_done()
+
+    assert events == []
+
+
 async def test_new_hazard_fires_one_event(hass):
     coordinator = make_coordinator(hass)
     events = async_capture_events(hass, EVENT_ALERT)
