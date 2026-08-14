@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
@@ -79,5 +80,9 @@ class WxAlertsLocationEntity(Entity):
                 )
             )
 
+    @callback
     def _handle_update(self, *_args: Any) -> None:
+        # Must be a callback: the dispatcher runs an undecorated sync target
+        # in an executor thread, and async_write_ha_state from a thread is a
+        # hard error — every entity would stay stuck at its initial state.
         self.async_write_ha_state()

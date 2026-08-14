@@ -7,3 +7,5 @@ venv/
 .pytest_cache/
 .DS_Store
 *.zip
+.venv/
+.coverage
