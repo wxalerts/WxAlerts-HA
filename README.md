@@ -168,6 +168,12 @@ weather-dependent, so a county with nothing live skips rather than fails.
 above it is fed by `_handle_message(topic, payload)`, which is what the
 tests drive.
 
+Leave `custom_components/wxalerts/brand/icon.png` where it is. Home
+Assistant 2026.3 and later serve a custom integration's icon straight out
+of that folder through the brands proxy, and HACS validation fails without
+it. There is no PR to open against `home-assistant/brands` — that repo no
+longer accepts custom integrations.
+
 ## Data source
 
 NOAA/NWS alerts and GOES-19 GLM lightning, redistributed by
