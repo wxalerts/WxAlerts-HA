@@ -9,15 +9,31 @@ on:
 
 jobs:
   hassfest:
+    name: hassfest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: home-assistant/actions/hassfest@master
 
   hacs:
+    name: HACS
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: hacs/action@main
         with:
           category: integration
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements-test.txt
+      # The live tests are deselected by pytest.ini; CI must never depend on
+      # the weather, or on the broker being reachable from a runner.
+      - run: pytest --cov=custom_components/wxalerts --cov-report=term-missing

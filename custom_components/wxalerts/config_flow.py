@@ -50,7 +50,7 @@ from .geo import geohash_encode, same_from_county_url
 
 _LOGGER = logging.getLogger(__name__)
 
-_USER_AGENT = "wxalerts-homeassistant (github.com/kn4oqw-clint/wxalerts-homeassistant)"
+_USER_AGENT = "WxAlerts-HA (github.com/wxalerts/WxAlerts-HA)"
 
 _ZONE_SELECTOR = selector.EntitySelector(
     selector.EntitySelectorConfig(domain="zone", multiple=True)

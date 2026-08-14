@@ -1,9 +1,16 @@
 # WxAlerts for Home Assistant
 
+[![HACS Custom Repository](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz)
+[![GitHub Release](https://img.shields.io/github/release/wxalerts/WxAlerts-HA.svg)](https://github.com/wxalerts/WxAlerts-HA/releases)
+[![Validate](https://github.com/wxalerts/WxAlerts-HA/actions/workflows/validate.yml/badge.svg)](https://github.com/wxalerts/WxAlerts-HA/actions/workflows/validate.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Live **NWS weather alerts** and **GOES GLM lightning** from the
 [wxalerts.org](https://wxalerts.org) MQTT feed, mapped onto your Home
 Assistant zones. Push, not polling: alerts arrive the moment they are
 published and disappear the moment they end.
+
+> Requires Home Assistant **2024.12.0** or newer.
 
 ## What you get
 
@@ -85,9 +92,8 @@ automation:
 
 ### HACS (recommended)
 
-1. HACS → Integrations → ⋮ → **Custom repositories**
-2. Add `https://github.com/kn4oqw-clint/wxalerts-homeassistant`, category
-   **Integration**
+1. HACS → ⋮ → **Custom repositories**
+2. Add `https://github.com/wxalerts/WxAlerts-HA`, type **Integration**
 3. Install **WxAlerts**, restart Home Assistant
 4. Settings → Devices & Services → **Add Integration** → WxAlerts
 5. Pick your zones, toggle alerts/lightning, done
@@ -110,11 +116,13 @@ Settings → Devices & Services → WxAlerts → **Configure**:
 
 ## How it connects
 
-The integration holds **one** MQTT-over-WebSocket connection to
-`mqtt.wxalerts.org` (public, read-only; the credential is deliberately
-published). It subscribes only to the counties and geohash boxes you
-configured — the retained alert set repopulates every entity immediately
-on startup or reconnect, with no polling and no "unknown" gap.
+The integration holds **one** MQTT v5 connection over websockets to
+`wss://mqtt.wxalerts.org/mqtt` (port 443, public and read-only — the
+credential `wxalerts`/`wxalerts` is deliberately published, and the broker
+denies publish on every topic). It subscribes only to the counties and
+geohash boxes you configured — the retained alert set repopulates every
+entity immediately on startup or reconnect, with no polling and no
+"unknown" gap.
 
 Hazard endings arrive as MQTT tombstones (empty retained payloads), so an
 alert clears the moment the NWS cancels it or it runs out of time —
@@ -141,13 +149,40 @@ this integration is a single swappable object (`FeedClient` in
   unions); `geometry_source` on each alert tells you whether the shape is
   a tight storm polygon or a coarse county union.
 
+## Development
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-test.txt
+.venv/bin/python -m pytest            # the full suite, no network
+.venv/bin/python -m pytest -m live    # against the production broker
+```
+
+The default run fakes the MQTT transport, so it is deterministic and
+offline. The `live` tests are deselected by default: they dial the real
+broker to check what a fake cannot — TLS, websockets, MQTT v5, and that
+live payloads are still shaped the way the entities assume. They are
+weather-dependent, so a county with nothing live skips rather than fails.
+
+`FeedClient` in `coordinator.py` is the whole MQTT surface. Everything
+above it is fed by `_handle_message(topic, payload)`, which is what the
+tests drive.
+
 ## Data source
 
 NOAA/NWS alerts and GOES-19 GLM lightning, redistributed by
-[WxAlerts.org](https://wxalerts.org). The feed is public NOAA data; do not
-rely on any single delivery path for life-safety decisions — a weather
-radio has no dependencies.
+[WxAlerts.org](https://wxalerts.org) — a nonprofit open-source weather
+alerting platform. The feed is public NOAA data; do not rely on any single
+delivery path for life-safety decisions — a weather radio has no
+dependencies.
+
+## Contributing
+
+Issues and pull requests are welcome at
+[github.com/wxalerts/WxAlerts-HA](https://github.com/wxalerts/WxAlerts-HA).
+Please run the test suite before opening a PR; CI runs hassfest, HACS
+validation and the same tests.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)

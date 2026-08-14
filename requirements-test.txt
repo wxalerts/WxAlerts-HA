@@ -3,3 +3,4 @@
 # run inside.
 pytest-homeassistant-custom-component
 aiomqtt>=2.3.0
+pytest-cov
