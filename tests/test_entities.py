@@ -265,6 +265,20 @@ async def test_a_marker_appears_for_a_hazard_with_geometry(hass, setup_integrati
     assert marker.attributes["geometry_source"] == "polygon"
 
 
+async def test_marker_geometry_is_kept_out_of_the_recorder(hass, setup_integration):
+    """A county-union polygon is tens of kilobytes. Left recordable it blows
+    the 16 KB attribute cap, and the recorder then stores none of the
+    attributes at all and warns on every write."""
+    from custom_components.wxalerts.geo_location import AlertMarker
+
+    assert "geometry" in AlertMarker._unrecorded_attributes
+
+    await feed(hass, setup_integration, TOPIC_TORNADO, encode(TORNADO_ALERT))
+
+    # Still present live — that is what the map card reads.
+    assert geo_entities(hass)[0].attributes["geometry"] == TORNADO_ALERT["geometry"]
+
+
 async def test_the_marker_vanishes_on_the_tombstone(hass, setup_integration):
     coordinator = setup_integration
     await feed(hass, coordinator, TOPIC_TORNADO, encode(TORNADO_ALERT))

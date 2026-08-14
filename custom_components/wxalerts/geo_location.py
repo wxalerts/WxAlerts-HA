@@ -95,6 +95,12 @@ class AlertMarker(GeolocationEvent):
     _attr_source = SOURCE
     _attr_unit_of_measurement = UnitOfLength.KILOMETERS
     _attr_icon = "mdi:alert"
+    # A county-union polygon runs to tens of kilobytes, well past the
+    # recorder's 16 KB attribute cap — which makes it drop *every* attribute
+    # on the entity and log about it on each write. Keeping geometry out of
+    # the recorder leaves it live in the state machine for cards and
+    # templates, which is the only place it was ever useful.
+    _unrecorded_attributes = frozenset({"geometry"})
 
     def __init__(
         self,
