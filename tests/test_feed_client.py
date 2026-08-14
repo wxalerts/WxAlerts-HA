@@ -155,6 +155,51 @@ async def test_connects_with_v5_over_websockets(fake_mqtt, collected):
     assert kwargs["tls_context"] is not None
 
 
+async def test_a_supplied_tls_context_is_used_as_is(fake_mqtt, collected):
+    """Building an SSL context reads the CA bundle off disk. Home Assistant
+    hands in a pre-warmed one; creating another would block the event loop."""
+    import ssl
+
+    context = ssl.create_default_context()
+    fake_mqtt.append([])
+    client = make_client(collected, tls_context=context)
+
+    with patch("custom_components.wxalerts.coordinator.ssl.create_default_context") as make:
+        await run_feed(client)
+
+    make.assert_not_called()
+    assert FakeMqttClient.instances[0].kwargs["tls_context"] is context
+
+
+async def test_tls_context_is_built_off_the_loop_and_reused(fake_mqtt, collected):
+    """Standalone use (no Home Assistant to hand one in) must still keep the
+    disk read off the event loop, and must not repeat it per reconnect."""
+    import ssl
+    import threading
+
+    fake_mqtt.append([])
+    fake_mqtt.append([])
+    client = make_client(collected)
+
+    main_thread = threading.current_thread()
+    built_on: list[threading.Thread] = []
+    real_create = ssl.create_default_context
+
+    def record_and_create(*args, **kwargs):
+        built_on.append(threading.current_thread())
+        return real_create(*args, **kwargs)
+
+    with patch(
+        "custom_components.wxalerts.coordinator.ssl.create_default_context",
+        side_effect=record_and_create,
+    ):
+        await run_feed(client, connections=2)
+
+    assert len(built_on) == 1, "rebuilt the context on reconnect"
+    assert built_on[0] is not main_thread, "built on the event loop thread"
+    assert client._config.tls_context is not None
+
+
 async def test_subscribes_to_every_configured_topic(fake_mqtt, collected):
     fake_mqtt.append([])
     client = make_client(collected)
@@ -250,27 +295,36 @@ async def test_backoff_is_capped(fake_mqtt, collected):
 
 async def test_backoff_resets_after_a_stable_connection(fake_mqtt, collected):
     """A connection that held for hours and then dropped is not the broker
-    pushing back — the next attempt should not start at a five-minute wait.
+    pushing back — the next attempt must not start at a five-minute wait.
 
-    Each successful pass reads the clock twice: once on connect, once to
-    judge whether the connection was stable. The third pass is scripted to
-    have lasted well past the reset threshold.
+    The threshold is moved rather than the clock: ``time.monotonic`` is also
+    the event loop's own clock, so faking it globally breaks the scheduler.
     """
     client = make_client(collected)
     for _ in range(3):
         fake_mqtt.append([])  # connects, stream ends, reconnect
 
-    # Never 0.0: the loop only judges stability when it actually connected,
-    # and it tests that by truthiness of the connect timestamp.
-    clock = iter([100.0, 100.0, 100.0, 100.0, 100.0, 10_000.0])
+    with patch("custom_components.wxalerts.coordinator._BACKOFF_RESET_AFTER", -1):
+        delays = await run_feed(client, connections=3)
+
+    assert delays == [_BACKOFF_INITIAL] * 3
+
+
+async def test_backoff_keeps_escalating_while_connections_are_short_lived(
+    fake_mqtt, collected
+):
+    """The counterpart: a connection that drops immediately is not stable, so
+    each retry waits longer."""
+    client = make_client(collected)
+    for _ in range(3):
+        fake_mqtt.append([])
 
     with patch(
-        "custom_components.wxalerts.coordinator.time.monotonic",
-        side_effect=lambda: next(clock),
+        "custom_components.wxalerts.coordinator._BACKOFF_RESET_AFTER", 86_400
     ):
         delays = await run_feed(client, connections=3)
 
-    assert delays == [_BACKOFF_INITIAL, _BACKOFF_INITIAL * 2, _BACKOFF_INITIAL]
+    assert delays == [2.0, 4.0, 8.0]
 
 
 async def test_reconnect_resubscribes(fake_mqtt, collected):

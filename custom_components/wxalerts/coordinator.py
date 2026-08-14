@@ -27,6 +27,7 @@ import aiomqtt
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.instance_id import async_get as async_get_instance_id
+from homeassistant.util.ssl import get_default_context
 
 from .const import (
     CONF_ENABLE_ALERTS,
@@ -76,6 +77,10 @@ class FeedConfig:
     password: str = DEFAULT_PASSWORD
     client_id: str = ""
     subscriptions: list[tuple[str, int]] = field(default_factory=list)
+    # Building an SSL context reads the CA bundle off disk. Hand one in so
+    # that never happens on the event loop; FeedClient builds its own in a
+    # thread if this is None, so it stays usable outside Home Assistant.
+    tls_context: ssl.SSLContext | None = None
 
 
 class FeedClient:
@@ -111,12 +116,21 @@ class FeedClient:
                 pass
             self._task = None
 
+    async def _tls_context(self) -> ssl.SSLContext:
+        """The TLS context, built off the event loop and reused thereafter."""
+        if self._config.tls_context is None:
+            loop = asyncio.get_running_loop()
+            self._config.tls_context = await loop.run_in_executor(
+                None, ssl.create_default_context
+            )
+        return self._config.tls_context
+
     async def _run(self) -> None:
         backoff = _BACKOFF_INITIAL
         while not self._stopping:
             connected_at = 0.0
             try:
-                tls_context = ssl.create_default_context()
+                tls_context = await self._tls_context()
                 async with aiomqtt.Client(
                     hostname=self._config.host,
                     port=self._config.port,
@@ -241,6 +255,9 @@ class WxAlertsCoordinator:
         config = FeedConfig(
             client_id=f"wxha-{instance_id[:12]}-{self.entry.entry_id[:8]}",
             subscriptions=self._build_subscriptions(),
+            # Home Assistant pre-warms this at import, so it costs nothing
+            # here and never touches the disk from the event loop.
+            tls_context=get_default_context(),
         )
         if not config.subscriptions:
             _LOGGER.warning("Nothing to subscribe to — no locations resolved")
