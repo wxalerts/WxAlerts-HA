@@ -16,18 +16,22 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 from custom_components.wxalerts.const import (
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
-    CONF_GLM_PRECISION,
+    CONF_GLM_ALERT,
+    CONF_GLM_PERSONS,
+    CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
     CONF_LOCATIONS,
     DOMAIN,
     EVENT_ALERT,
     MAX_SUBSCRIPTIONS,
     SEVERITY_NONE,
+    TOPIC_GLM_STATUS,
 )
 from custom_components.wxalerts.coordinator import WxAlertsCoordinator
 
 from .const import (
     GLM_BURST,
+    GLM_BURST_EPOCH,
     HEAT_ALERT,
     LOCATION_AUTAUGA,
     LOCATION_OFFSHORE,
@@ -42,6 +46,7 @@ from .const import (
     TOPIC_TORNADO,
     TORNADO_ALERT,
     encode,
+    fresh_burst,
 )
 
 
@@ -60,7 +65,11 @@ def make_coordinator(hass, locations=None, **options) -> WxAlertsCoordinator:
         entry_id="testentry",
     )
     entry.add_to_hass(hass)
-    return WxAlertsCoordinator(hass, entry)
+    coordinator = WxAlertsCoordinator(hass, entry)
+    # Setup resolves targets before the platforms are forwarded; a coordinator
+    # that never did would plan no coverage and subscribe to nothing.
+    coordinator.prepare()
+    return coordinator
 
 
 # ---------------------------------------------------------------------------
@@ -70,24 +79,34 @@ def make_coordinator(hass, locations=None, **options) -> WxAlertsCoordinator:
 
 async def test_subscribes_to_county_and_lightning_topics(hass):
     coordinator = make_coordinator(
-        hass, [LOCATION_SANTA_ROSA, LOCATION_AUTAUGA], **{CONF_GLM_PRECISION: 3}
+        hass, [LOCATION_SANTA_ROSA, LOCATION_AUTAUGA], **{CONF_GLM_RADIUS: 30}
     )
-    subs = coordinator._build_subscriptions()
+    topics = [topic for topic, _ in coordinator._build_subscriptions()]
 
-    assert subs == [
-        (f"wxalerts/nws/v1/same/{SAME_SANTA_ROSA}/#", 1),
-        (f"wxalerts/nws/v1/same/{SAME_AUTAUGA}/#", 1),
-        ("wxalerts/glm/v1/d/j/6/#", 0),
-        ("wxalerts/glm/v1/d/j/f/#", 0),
+    assert topics[:3] == [
+        f"wxalerts/nws/v1/same/{SAME_SANTA_ROSA}/#",
+        f"wxalerts/nws/v1/same/{SAME_AUTAUGA}/#",
+        TOPIC_GLM_STATUS,
     ]
+    # Both zones are covered, and each takes more than the one cell it sits in.
+    assert "wxalerts/glm/v1/d/j/6/#" in topics
+    assert "wxalerts/glm/v1/d/j/f/#" in topics
+    assert len(topics) > 5
 
 
 async def test_alert_subscriptions_use_qos1_and_lightning_qos0(hass):
-    """Alerts are retained state and must not be dropped; lightning is QoS 0
-    by design — a redelivered flash batch is worthless."""
+    """Alerts are retained state and must not be dropped; flash bursts are
+    QoS 0 by design — a redelivered batch is worthless.
+
+    The heartbeat is the exception: it is retained state about whether the feed
+    is alive, and losing it silently is the failure it exists to prevent.
+    """
     coordinator = make_coordinator(hass)
     for topic, qos in coordinator._build_subscriptions():
-        assert qos == (1 if "/nws/" in topic else 0)
+        if "/nws/" in topic or topic == TOPIC_GLM_STATUS:
+            assert qos == 1
+        else:
+            assert qos == 0
 
 
 async def test_never_subscribes_to_a_whole_root(hass):
@@ -113,12 +132,13 @@ async def test_disabling_lightning_drops_glm_subscriptions(hass):
 
 
 async def test_zone_without_a_county_still_gets_lightning(hass):
-    """Offshore and non-US zones have no SAME code but do have a geohash."""
-    coordinator = make_coordinator(hass, [LOCATION_OFFSHORE], **{CONF_GLM_PRECISION: 3})
+    """Offshore and non-US zones have no SAME code but still have coordinates."""
+    coordinator = make_coordinator(hass, [LOCATION_OFFSHORE], **{CONF_GLM_RADIUS: 30})
     topics = [topic for topic, _ in coordinator._build_subscriptions()]
 
     assert coordinator.same_codes == []
-    assert topics == ["wxalerts/glm/v1/d/j/1/#"]
+    assert TOPIC_GLM_STATUS in topics
+    assert any(topic.startswith("wxalerts/glm/v1/d/j/") for topic in topics)
 
 
 async def test_duplicate_counties_subscribe_once(hass):
@@ -129,7 +149,10 @@ async def test_duplicate_counties_subscribe_once(hass):
     )
 
     assert coordinator.same_codes == [SAME_SANTA_ROSA]
-    assert len(coordinator._build_subscriptions()) == 2  # one county, one box
+    topics = [topic for topic, _ in coordinator._build_subscriptions()]
+    assert len([t for t in topics if "/nws/" in t]) == 1
+    # Both zones share a position, so they share coverage rather than doubling it.
+    assert len(topics) == len(set(topics))
 
 
 async def test_subscription_cap_trims_lightning_and_keeps_alerts(hass):
@@ -140,21 +163,19 @@ async def test_subscription_cap_trims_lightning_and_keeps_alerts(hass):
             **LOCATION_SANTA_ROSA,
             "zone_entity_id": f"zone.z{index}",
             "same": f"01{index:04d}",
-            # Distinct geohash boxes so none of them dedup away.
-            "geohash": f"d{'bcdefghjkmnpqrstuvwx'[index]}6n7",
+            # Spread far apart so none of the coverage overlaps.
+            "latitude": 25.0 + index * 2.0,
+            "longitude": -100.0 + index * 2.0,
         }
         for index in range(14)
     ]
-    coordinator = make_coordinator(hass, locations, **{CONF_GLM_PRECISION: 3})
-
-    with patch.object(
-        coordinator, "_build_subscriptions", wraps=coordinator._build_subscriptions
-    ):
-        subs = coordinator._build_subscriptions()
+    coordinator = make_coordinator(hass, locations, **{CONF_GLM_RADIUS: 30})
+    subs = coordinator._build_subscriptions()
 
     assert len(subs) == MAX_SUBSCRIPTIONS
     alert_subs = [topic for topic, _ in subs if "/nws/" in topic]
     assert len(alert_subs) == 14, "every county must survive the trim"
+    assert coordinator.glm_dropped_cells > 0, "the trim must be reported, not silent"
 
 
 # ---------------------------------------------------------------------------
@@ -170,11 +191,12 @@ async def test_alert_message_is_stored_under_its_county(hass):
     assert [alert["event"] for alert in alerts] == ["Tornado Warning"]
 
 
-async def test_lightning_message_is_stored_under_its_box(hass):
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 3})
-    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(GLM_BURST))
+async def test_lightning_message_lands_in_the_window(hass):
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(fresh_burst()))
 
-    assert coordinator.flash_count("dj6") == 2
+    assert coordinator.glm_window_flashes == 2
+    assert coordinator.metrics_for("zone.home").total == 2
 
 
 @pytest.mark.parametrize(
@@ -196,7 +218,7 @@ async def test_unrelated_topics_are_ignored(hass, topic):
     await coordinator._handle_message(topic, encode(TORNADO_ALERT))
 
     assert coordinator.alerts_for(SAME_SANTA_ROSA) == []
-    assert coordinator.flash_count("dj6") == 0
+    assert coordinator.glm_window_flashes == 0
 
 
 async def test_undecodable_payload_does_not_raise_or_store(hass):
@@ -205,7 +227,7 @@ async def test_undecodable_payload_does_not_raise_or_store(hass):
     await coordinator._handle_message(TOPIC_GLM_LEAF, b"<html>502</html>")
 
     assert coordinator.alerts_for(SAME_SANTA_ROSA) == []
-    assert coordinator.flash_count("dj6") == 0
+    assert coordinator.glm_window_flashes == 0
 
 
 # ---------------------------------------------------------------------------
@@ -471,131 +493,281 @@ async def test_counties_are_independent(hass):
 
 
 # ---------------------------------------------------------------------------
-# Lightning
+# Lightning proximity
 # ---------------------------------------------------------------------------
+
+# The fixture burst sits ~2.3 miles south of zone.home, which is what makes it
+# useful: it is inside every ring, so a ring that reports zero is broken rather
+# than merely quiet.
 
 
 async def test_flashes_accumulate_across_bursts(hass):
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 3})
-    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(GLM_BURST))
-    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(GLM_BURST))
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(fresh_burst()))
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(fresh_burst()))
 
-    assert coordinator.flash_count("dj6") == 4
+    assert coordinator.metrics_for("zone.home").total == 4
 
 
-async def test_flashes_outside_the_configured_box_are_ignored(hass):
-    """Subscriptions are per-box, but a wildcard reconfigure or a shared
-    connection could deliver a neighbouring cell."""
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 3})
-    await coordinator._handle_message("wxalerts/glm/v1/9/x/j/5/e", encode(GLM_BURST))
+async def test_distance_is_measured_not_inferred_from_the_cell(hass):
+    """The whole point of the rework: rings are radial, not box membership."""
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(fresh_burst()))
 
-    assert coordinator.flash_count("dj6") == 0
+    metrics = coordinator.metrics_for("zone.home")
+    assert metrics.nearest_mi == pytest.approx(2.3, abs=0.2)
+    assert metrics.rings[5] == 2
+    assert metrics.rings[10] == 2
+    assert metrics.rings[30] == 2
+
+
+async def test_flashes_beyond_the_radius_do_not_count(hass):
+    """A cell can be much larger than the ring, so cell membership alone would
+    report a strike 60 miles away as if it were overhead."""
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 10})
+    far = fresh_burst(lat=31.5, lon=-87.05)
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(far))
+
+    metrics = coordinator.metrics_for("zone.home")
+    assert metrics.total == 0
+    assert metrics.nearest_mi is None, "no lightning is not the same as lightning at the edge"
+
+
+async def test_the_ring_reaches_outside_the_containing_cell(hass):
+    """A location near its cell's edge must still be covered on that side.
+
+    zone.home sits about 4 miles from the southern edge of its precision-4
+    cell, so a single-cell subscription is blind to a strike 8 miles south —
+    which is well inside the seek-shelter ring.
+    """
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    topics = [topic for topic, _ in coordinator._build_subscriptions()]
+    glm_topics = [topic for topic in topics if "/glm/v1/" in topic and topic != TOPIC_GLM_STATUS]
+
+    assert len(glm_topics) > 1, "one cell can never cover a radius it is smaller than"
+
+
+async def test_nearby_flag_follows_the_alert_distance(hass):
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_ALERT: 1})
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(fresh_burst()))
+    assert coordinator.metrics_for("zone.home").nearby is False
+
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_ALERT: 10})
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(fresh_burst()))
+    assert coordinator.metrics_for("zone.home").nearby is True
+
+
+async def test_rings_beyond_the_radius_are_dropped(hass):
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 10})
+    assert coordinator.glm_rings == (5, 10)
 
 
 async def test_flash_details_are_carried_through(hass):
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 3})
-    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(GLM_BURST))
-
-    flash = coordinator.recent_flashes("dj6")[0]
-    assert flash["latitude"] == 30.6103
-    assert flash["longitude"] == -87.0547
-    assert flash["energy_j"] == 1.21e-13
-    assert flash["geohash"] == "dj6n7"
-    assert flash["time"] == "2026-08-13T23:57:39.195468+00:00"
-
-
-async def test_flashes_age_out_of_the_window(hass):
-    coordinator = make_coordinator(
-        hass, **{CONF_GLM_PRECISION: 3, CONF_GLM_WINDOW: 15}
-    )
-    with patch("custom_components.wxalerts.coordinator.time.time", return_value=1000.0):
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    # Stand in the capture's own moment so the verbatim payload is inside the
+    # window; the point of this test is that its fields survive the round trip.
+    with patch(
+        "custom_components.wxalerts.coordinator.time.time",
+        return_value=GLM_BURST_EPOCH + 5,
+    ):
         await coordinator._handle_message(TOPIC_GLM_LEAF, encode(GLM_BURST))
-        assert coordinator.flash_count("dj6") == 2
 
-    # 14 minutes later: still inside the window.
-    with patch("custom_components.wxalerts.coordinator.time.time", return_value=1840.0):
-        assert coordinator.flash_count("dj6") == 2
+        # Nearest first, so this is the second flash in the capture — the closer
+    # of the two to zone.home.
+    flash = coordinator.recent_flashes("zone.home")[0]
 
-    # 16 minutes later: aged out.
-    with patch("custom_components.wxalerts.coordinator.time.time", return_value=1961.0):
-        assert coordinator.flash_count("dj6") == 0
+    assert flash["latitude"] == 30.6110
+    assert flash["longitude"] == -87.0530
+    assert flash["energy_j"] == 3.28e-13
+    assert flash["time"] == "2026-08-13T23:57:44.695584+00:00"
+    assert flash["distance_mi"] == pytest.approx(2.2, abs=0.2)
+
+
+async def test_flashes_age_out_on_their_own_timestamp(hass):
+    """Windowing on arrival time would put a replayed burst in the wrong window
+    and, worse, keep a ten-minute-old flash alive for a full fresh window."""
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_WINDOW: 15})
+    burst_epoch = 1786000000.0
+    burst = {
+        **GLM_BURST,
+        "flashes": [
+            {**GLM_BURST["flashes"][0], "t": burst_epoch},
+            {**GLM_BURST["flashes"][1], "t": burst_epoch},
+        ],
+    }
+
+    with patch(
+        "custom_components.wxalerts.coordinator.time.time", return_value=burst_epoch
+    ):
+        await coordinator._handle_message(TOPIC_GLM_LEAF, encode(burst))
+        assert coordinator.metrics_for("zone.home").total == 2
+
+    # 14 minutes after the flash: still inside the window.
+    with patch("custom_components.wxalerts.lightning.time.time", return_value=burst_epoch + 840):
+        coordinator._recompute_all(burst_epoch + 840)
+    assert coordinator.metrics_for("zone.home").total == 2
+
+    # 16 minutes after: aged out.
+    coordinator._recompute_all(burst_epoch + 961)
+    assert coordinator.metrics_for("zone.home").total == 0
 
 
 async def test_window_length_is_configurable(hass):
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 3, CONF_GLM_WINDOW: 60})
-    with patch("custom_components.wxalerts.coordinator.time.time", return_value=1000.0):
-        await coordinator._handle_message(TOPIC_GLM_LEAF, encode(GLM_BURST))
-
-    # 30 minutes on — outside a 15-minute window, inside a 60-minute one.
-    with patch("custom_components.wxalerts.coordinator.time.time", return_value=2800.0):
-        assert coordinator.flash_count("dj6") == 2
-
-
-async def test_recent_flashes_is_capped_and_newest_last(hass):
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 3})
-    for index in range(20):
-        burst = {
-            **GLM_BURST,
-            "flashes": [{**GLM_BURST["flashes"][0], "lat": float(index)}],
-        }
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_WINDOW: 60})
+    burst_epoch = 1786000000.0
+    burst = {
+        **GLM_BURST,
+        "flashes": [{**GLM_BURST["flashes"][0], "t": burst_epoch}],
+    }
+    with patch(
+        "custom_components.wxalerts.coordinator.time.time", return_value=burst_epoch
+    ):
         await coordinator._handle_message(TOPIC_GLM_LEAF, encode(burst))
 
-    recent = coordinator.recent_flashes("dj6", limit=5)
-    assert len(recent) == 5
-    assert [flash["latitude"] for flash in recent] == [15.0, 16.0, 17.0, 18.0, 19.0]
+    # 30 minutes on — outside a 15-minute window, inside a 60-minute one.
+    coordinator._recompute_all(burst_epoch + 1800)
+    assert coordinator.metrics_for("zone.home").total == 1
+
+
+async def test_rate_is_flashes_per_minute_over_the_window(hass):
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_WINDOW: 10})
+    for _ in range(10):
+        await coordinator._handle_message(TOPIC_GLM_LEAF, encode(fresh_burst()))
+
+    # 20 flashes over a 10-minute window.
+    assert coordinator.metrics_for("zone.home").rate_per_min == pytest.approx(2.0)
+
+
+async def test_closest_flashes_are_nearest_first(hass):
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    for offset in (0.30, 0.02, 0.15):
+        burst = fresh_burst(lat=30.6435 - offset, lon=-87.0545)
+        await coordinator._handle_message(TOPIC_GLM_LEAF, encode(burst))
+
+    distances = [f["distance_mi"] for f in coordinator.recent_flashes("zone.home")]
+    assert distances == sorted(distances)
+
+
+# ---------------------------------------------------------------------------
+# Staleness — a confident zero during an outage is the dangerous failure
+# ---------------------------------------------------------------------------
+
+
+async def test_lightning_is_available_before_anything_arrives(hass):
+    """A genuinely quiet cell produces no messages, so silence at startup
+    cannot mean the feed is dead."""
+    coordinator = make_coordinator(hass)
+    coordinator._handle_connection(True)
+    assert coordinator.glm_available is True
+
+
+async def test_a_stale_heartbeat_makes_lightning_unavailable(hass):
+    coordinator = make_coordinator(hass)
+    coordinator._handle_connection(True)
+
+    status = {"healthy": True, "last_granule_age_seconds": 20}
+    coordinator._handle_glm_status(encode(status))
+    assert coordinator.glm_available is True
+
+    stale = {"healthy": True, "last_granule_age_seconds": 3600}
+    coordinator._handle_glm_status(encode(stale))
+    assert coordinator.glm_available is False
+
+
+async def test_an_unhealthy_feed_makes_lightning_unavailable(hass):
+    """The ingest knows whether NOAA is still delivering; we do not."""
+    coordinator = make_coordinator(hass)
+    coordinator._handle_connection(True)
+    coordinator._handle_glm_status(encode({"healthy": False}))
+
+    assert coordinator.glm_available is False
+
+
+async def test_a_dropped_connection_makes_lightning_unavailable(hass):
+    coordinator = make_coordinator(hass)
+    coordinator._handle_connection(True)
+    coordinator._handle_glm_status(encode({"healthy": True, "last_granule_age_seconds": 5}))
+    coordinator._handle_connection(False)
+
+    assert coordinator.glm_available is False
+
+
+async def test_heartbeat_topic_is_not_parsed_as_a_flash_burst(hass):
+    coordinator = make_coordinator(hass)
+    await coordinator._handle_message(
+        TOPIC_GLM_STATUS, encode({"healthy": True, "last_granule_age_seconds": 1})
+    )
+    assert coordinator.glm_window_flashes == 0
+
 
 
 async def test_empty_lightning_payload_is_not_a_tombstone(hass):
     """Nothing on the GLM tree is retained, so an empty payload is noise —
-    it must not clear the rolling count."""
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 3})
-    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(GLM_BURST))
+    it must not clear the rolling window."""
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(fresh_burst()))
     await coordinator._handle_message(TOPIC_GLM_LEAF, TOMBSTONE)
 
-    assert coordinator.flash_count("dj6") == 2
+    assert coordinator.metrics_for("zone.home").total == 2
 
 
 async def test_burst_with_no_flashes_is_harmless(hass):
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 3})
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
     await coordinator._handle_message(
         TOPIC_GLM_LEAF, encode({**GLM_BURST, "count": 0, "flashes": []})
     )
 
-    assert coordinator.flash_count("dj6") == 0
-    assert coordinator.last_flash_time("dj6") is None
+    metrics = coordinator.metrics_for("zone.home")
+    assert metrics.total == 0
+    assert metrics.last_flash_at is None
 
 
-async def test_last_flash_time_uses_the_flash_timestamp(hass):
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 3})
-    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(GLM_BURST))
+async def test_last_flash_uses_the_flash_timestamp(hass):
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    with patch(
+        "custom_components.wxalerts.coordinator.time.time",
+        return_value=GLM_BURST_EPOCH + 5,
+    ):
+        await coordinator._handle_message(TOPIC_GLM_LEAF, encode(GLM_BURST))
 
-    last = coordinator.last_flash_time("dj6")
+    last = coordinator.metrics_for("zone.home").last_flash_at
     assert last is not None
     assert last.isoformat() == "2026-08-13T23:57:44.695584+00:00"
 
 
-async def test_last_flash_time_falls_back_to_receipt_time(hass):
-    """A malformed ``t`` must not blow up the sensor's attributes."""
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 3})
+async def test_an_unparseable_timestamp_falls_back_to_receipt_time(hass):
+    """A malformed ``t`` must not blow up the sensor or silently window the
+    flash into 1970."""
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
     burst = {**GLM_BURST, "flashes": [{**GLM_BURST["flashes"][0], "t": "not a time"}]}
-    with patch("custom_components.wxalerts.coordinator.time.time", return_value=1000.0):
+    with patch(
+        "custom_components.wxalerts.coordinator.time.time", return_value=1786000000.0
+    ):
         await coordinator._handle_message(TOPIC_GLM_LEAF, encode(burst))
-        last = coordinator.last_flash_time("dj6")
 
+    last = coordinator.metrics_for("zone.home").last_flash_at
     assert last is not None
-    assert last.timestamp() == 1000.0
+    assert last.timestamp() == 1786000000.0
 
 
-async def test_lightning_precision_selects_the_box(hass):
-    """Precision 5 is a single leaf cell; a neighbouring leaf in the same
-    county box must not count towards it."""
-    coordinator = make_coordinator(hass, **{CONF_GLM_PRECISION: 5})
-    assert coordinator.glm_prefixes == ["dj6n7"]
+async def test_a_flash_missing_coordinates_is_skipped_not_fatal(hass):
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    burst = {
+        **GLM_BURST,
+        "flashes": [{"t": GLM_BURST["flashes"][0]["t"], "energy_j": 1e-13}],
+    }
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(burst))
 
-    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(GLM_BURST))
-    await coordinator._handle_message("wxalerts/glm/v1/d/j/6/n/8", encode(GLM_BURST))
+    assert coordinator.glm_window_flashes == 0
 
-    assert coordinator.flash_count("dj6n7") == 2
+
+async def test_coverage_precision_is_derived_from_the_radius(hass):
+    """A small radius can be covered by finer cells, which means less traffic;
+    a large one has to fall back to coarser ones to fit the subscription cap."""
+    tight = make_coordinator(hass, **{CONF_GLM_RADIUS: 5})
+    wide = make_coordinator(hass, **{CONF_GLM_RADIUS: 50})
+
+    assert tight.glm_precision > wide.glm_precision
 
 
 # ---------------------------------------------------------------------------
@@ -648,3 +820,103 @@ async def test_connection_state_is_published(hass, mock_feed_client):
 
     coordinator._handle_connection(False)
     assert coordinator.connected is False
+
+
+# ---------------------------------------------------------------------------
+# Person targets
+# ---------------------------------------------------------------------------
+
+
+def set_person(hass, entity_id, lat, lon, name="Somebody"):
+    hass.states.async_set(
+        entity_id,
+        "home",
+        {"latitude": lat, "longitude": lon, "friendly_name": name},
+    )
+
+
+async def test_persons_are_not_tracked_unless_asked(hass):
+    set_person(hass, "person.clint", 30.65, -87.05, "Clint")
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+
+    assert [t.key for t in coordinator.targets] == ["zone.home"]
+
+
+async def test_a_person_with_a_fix_becomes_a_target(hass):
+    set_person(hass, "person.clint", 30.65, -87.05, "Clint")
+    coordinator = make_coordinator(
+        hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_PERSONS: True}
+    )
+
+    keys = [t.key for t in coordinator.targets]
+    assert "person.clint" in keys
+    person = coordinator.target("person.clint")
+    assert person.kind == "person"
+    assert person.name == "Clint"
+
+
+async def test_a_person_without_a_fix_is_skipped(hass):
+    """Reporting them at a stale or absent position is worse than not
+    reporting them at all."""
+    hass.states.async_set("person.nofix", "home", {"friendly_name": "No Fix"})
+    coordinator = make_coordinator(
+        hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_PERSONS: True}
+    )
+
+    assert [t.key for t in coordinator.targets] == ["zone.home"]
+
+
+async def test_a_person_far_away_extends_the_coverage(hass):
+    """Someone two states away needs their own cells, or their sensor would
+    read a confident zero using the house's coverage."""
+    set_person(hass, "person.away", 40.0, -105.0, "Away")
+    coordinator = make_coordinator(
+        hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_PERSONS: True}
+    )
+
+    topics = [topic for topic, _ in coordinator._build_subscriptions()]
+    assert any(topic.startswith("wxalerts/glm/v1/9") for topic in topics)
+
+
+async def test_moving_within_coverage_does_not_resubscribe(hass, mock_feed_client):
+    set_person(hass, "person.clint", 30.65, -87.05, "Clint")
+    coordinator = make_coordinator(
+        hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_PERSONS: True}
+    )
+    await coordinator.async_start()
+    before = list(coordinator._cells)
+
+    set_person(hass, "person.clint", 30.66, -87.06, "Clint")
+    await hass.async_block_till_done()
+
+    assert coordinator._cells == before
+    mock_feed_client.return_value.set_subscriptions.assert_not_called()
+
+
+async def test_moving_out_of_coverage_resubscribes(hass, mock_feed_client):
+    set_person(hass, "person.clint", 30.65, -87.05, "Clint")
+    coordinator = make_coordinator(
+        hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_PERSONS: True}
+    )
+    await coordinator.async_start()
+
+    set_person(hass, "person.clint", 40.0, -105.0, "Clint")
+    await hass.async_block_till_done()
+
+    mock_feed_client.return_value.set_subscriptions.assert_called()
+
+
+async def test_a_person_who_moves_is_measured_from_their_new_position(hass):
+    set_person(hass, "person.clint", 30.6435, -87.0545, "Clint")
+    coordinator = make_coordinator(
+        hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_PERSONS: True}
+    )
+    await coordinator.async_start()
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(fresh_burst()))
+    assert coordinator.metrics_for("person.clint").nearby is True
+
+    # 40 miles north: the same flashes, a different answer.
+    set_person(hass, "person.clint", 31.22, -87.0545, "Clint")
+    await hass.async_block_till_done()
+
+    assert coordinator.metrics_for("person.clint").nearby is False

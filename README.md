@@ -19,8 +19,8 @@ Each zone is resolved once, during setup, to:
 
 - its **county SAME code** (the same six-digit code a weather radio uses),
   via a single call to `api.weather.gov` — never polled again afterward
-- a **geohash box** for GLM lightning, computed locally from the zone's
-  coordinates
+- the centre of a **lightning proximity ring**, from which the feed
+  subscription is derived locally
 
 Both feeds are optional toggles — run alerts only, lightning only, or both.
 
@@ -34,11 +34,41 @@ Both feeds are optional toggles — run alerts only, lightning only, or both.
 | `binary_sensor` — per phenomenon | Tornado, Severe Thunderstorm, Flash Flood on by default; Flood, Winter Storm, Heat available but disabled. Toggle the whole set in options. |
 | `geo_location` — map markers | One marker per live hazard at its polygon centroid; the full GeoJSON polygon is an attribute. Markers vanish when the hazard ends. |
 
-### Entities per lightning box
+### Entities per lightning target
+
+A target is a zone, or — if you enable *Also track people* — any `person` with a
+GPS fix. Each gets its own `Lightning — <name>` device.
 
 | Entity | Description |
 |---|---|
-| `sensor` — Lightning flashes | GLM flashes in the zone's geohash box over a rolling window (default 15 min). Flash *rate* is the meaningful severe-weather signal — GLM cannot distinguish cloud-to-ground from intra-cloud, so a big energy number does not mean a dangerous strike. |
+| `binary_sensor` — Lightning within *n*mi | On when the closest flash is inside the seek-shelter distance (default 10 miles, the NWS *When Thunder Roars* figure). `device_class: safety`. This is the one to trigger on. |
+| `sensor` — Nearest strike | Miles to the closest flash in the window. Unknown, not the radius, when nothing has been seen. |
+| `sensor` — Strikes 5/10/20/30mi | Cumulative counts inside each ring. |
+| `sensor` — Strike rate | Flashes per minute inside the radius. Rate is the severe-weather signal — GLM cannot distinguish cloud-to-ground from intra-cloud, so a big energy number does not mean a dangerous strike. |
+| `sensor` — Since last strike | Minutes, for building an all-clear. |
+| `sensor` — Trend | Approaching / Receding / Steady / Unknown, from the first-versus-last nearest distance over several samples, so one distant flash cannot flip it. |
+
+#### Why a radius and not a box size
+
+The feed bins flashes into geohash cells, and those cells are aligned to the
+globe rather than to you. The cell containing a location sits wherever the grid
+puts it — one real station sits about 4 miles from its cell's southern edge, so
+subscribing to that cell alone left it blind to strikes 4–10 miles south, which
+is the direction its weather arrives from.
+
+So you give it a radius, and it works out which cells that radius reaches,
+subscribes to all of them, and measures every flash's true great-circle
+distance. Cell membership is never the answer to "how close is it".
+
+#### When the feed goes quiet
+
+Lightning entities report `unavailable`, never a calm-looking zero, when the
+feed goes stale — the integration watches the ingest's own heartbeat. A
+confident zero during an outage looks exactly like a quiet sky, and the outage
+is most likely when the storm is overhead.
+
+Trigger automations `from: "off"` rather than on any change to `on`, so a feed
+*recovering* (`unavailable` → `on`) does not read as news about the sky.
 
 ### Events
 

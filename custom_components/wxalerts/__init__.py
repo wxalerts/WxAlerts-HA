@@ -26,6 +26,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: WxAlertsConfigEntry) -> 
     """Set up WxAlerts from a config entry."""
     coordinator = WxAlertsCoordinator(hass, entry)
     entry.runtime_data = coordinator
+    # Targets first: the platforms build one entity set per target, so they
+    # have to exist before the platforms are forwarded.
+    coordinator.prepare()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await coordinator.async_start()

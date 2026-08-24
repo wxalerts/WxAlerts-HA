@@ -9,13 +9,22 @@ that line is the MQTT library's job, not this integration's.
 from __future__ import annotations
 
 import pytest
-from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
+from homeassistant.const import (
+    UnitOfLength,
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util.unit_conversion import DistanceConverter
 
 from custom_components.wxalerts.const import (
+    TOPIC_GLM_STATUS,
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
-    CONF_GLM_PRECISION,
+    CONF_GLM_ALERT,
+    CONF_GLM_RADIUS,
     CONF_LOCATIONS,
     CONF_PHENOMENON_SENSORS,
     CONF_ZONES,
@@ -25,7 +34,6 @@ from custom_components.wxalerts.const import (
 from .const import (
     GLM_BURST,
     HEAT_ALERT,
-    LOCATION_AUTAUGA,
     LOCATION_SANTA_ROSA,
     SEVERE_ALERT,
     TOMBSTONE,
@@ -35,6 +43,7 @@ from .const import (
     TOPIC_TORNADO,
     TORNADO_ALERT,
     encode,
+    fresh_burst,
 )
 
 ACTIVE_ALERT = "binary_sensor.wxalerts_home_active_alert"
@@ -42,7 +51,16 @@ TORNADO_SENSOR = "binary_sensor.wxalerts_home_tornado_alert"
 SEVERE_SENSOR = "binary_sensor.wxalerts_home_severe_thunderstorm_alert"
 SEVERITY = "sensor.wxalerts_home_highest_severity"
 COUNT = "sensor.wxalerts_home_active_alerts"
-LIGHTNING = "sensor.wxalerts_home_lightning_flashes"
+# The lightning device is named "Lightning — Home", so Home Assistant builds
+# these ids from the device and entity names together. They match what a
+# dashboard built against the standalone proximity service already points at,
+# which is the whole point of naming the device that way.
+NEAREST = "sensor.lightning_home_nearest_strike"
+RING_10 = "sensor.lightning_home_strikes_10mi"
+RATE = "sensor.lightning_home_strike_rate"
+SINCE = "sensor.lightning_home_since_last_strike"
+TREND = "sensor.lightning_home_trend"
+NEARBY = "binary_sensor.lightning_home_lightning_within_10mi"
 
 
 async def feed(hass, coordinator, topic, payload):
@@ -57,7 +75,7 @@ async def feed(hass, coordinator, topic, payload):
 
 
 async def test_entities_are_created_for_each_county(hass, setup_integration):
-    for entity_id in (ACTIVE_ALERT, SEVERITY, COUNT, LIGHTNING):
+    for entity_id in (ACTIVE_ALERT, SEVERITY, COUNT, NEAREST, RING_10, NEARBY):
         assert hass.states.get(entity_id) is not None, entity_id
 
     assert hass.states.get("binary_sensor.wxalerts_cabin_active_alert") is not None
@@ -216,57 +234,117 @@ async def test_severity_sensor_options_cover_every_state_it_reports(
 # ---------------------------------------------------------------------------
 
 
-async def test_lightning_sensor_counts_flashes(hass, setup_integration):
-    assert hass.states.get(LIGHTNING).state == "0"
-
-    await feed(hass, setup_integration, TOPIC_GLM_LEAF, encode(GLM_BURST))
-
-    state = hass.states.get(LIGHTNING)
-    assert state.state == "2"
-    assert state.attributes["geohash"] == "dj6"
-    assert state.attributes["window_minutes"] == 15
-    assert state.attributes["last_flash"] == "2026-08-13T23:57:44.695584+00:00"
-    assert state.attributes["unit_of_measurement"] == "flashes"
+def _nearest_miles(hass) -> float:
+    """The nearest-strike reading in miles, whatever unit it is displayed in."""
+    state = hass.states.get(NEAREST)
+    return DistanceConverter.convert(
+        float(state.state),
+        state.attributes["unit_of_measurement"],
+        UnitOfLength.MILES,
+    )
 
 
-async def test_lightning_identity_survives_a_box_size_change(
+async def test_proximity_sensors_report_distance_not_box_membership(
+    hass, setup_integration
+):
+    assert hass.states.get(RING_10).state == "0"
+    assert hass.states.get(NEAREST).state == STATE_UNKNOWN
+
+    await feed(hass, setup_integration, TOPIC_GLM_LEAF, encode(fresh_burst()))
+
+    assert hass.states.get(RING_10).state == "2"
+    # Distance is a device_class, so Home Assistant renders it in the viewer's
+    # unit system — miles on an imperial install, kilometres on this one.
+    assert _nearest_miles(hass) == pytest.approx(2.2, abs=0.2)
+    assert float(hass.states.get(RATE).state) == pytest.approx(0.13, abs=0.02)
+    assert float(hass.states.get(SINCE).state) < 1.0
+
+
+async def test_nearby_binary_sensor_is_a_safety_device(hass, setup_integration):
+    """This is the entity a seek-shelter automation triggers on."""
+    nearby = hass.states.get(NEARBY)
+    assert nearby.state == STATE_OFF
+    assert nearby.attributes["device_class"] == "safety"
+
+    await feed(hass, setup_integration, TOPIC_GLM_LEAF, encode(fresh_burst()))
+
+    nearby = hass.states.get(NEARBY)
+    assert nearby.state == STATE_ON
+    # The attribute is always miles: it is raw data for automations, not a
+    # rendered value, so it does not follow the unit system.
+    assert nearby.attributes["nearest_mi"] == pytest.approx(2.2, abs=0.2)
+
+
+async def test_a_strike_outside_the_alert_ring_does_not_arm_the_sensor(
+    hass, setup_integration
+):
+    """20 miles away is inside the 30-mile radius and outside the 10-mile
+    seek-shelter ring — the distinction the whole entity exists to make."""
+    await feed(
+        hass, setup_integration, TOPIC_GLM_LEAF, encode(fresh_burst(lat=30.35))
+    )
+
+    assert hass.states.get(NEARBY).state == STATE_OFF
+    assert hass.states.get(RING_10).state == "0"
+    assert hass.states.get("sensor.lightning_home_strikes_30mi").state == "2"
+
+
+async def test_lightning_identity_survives_a_radius_change(
     hass, config_entry, mock_feed_client, enable_custom_integrations
 ):
-    """The box size is an option. Deriving the unique_id from it renamed the
-    entity to _2 and orphaned the original every time someone changed it,
-    silently breaking any card or automation pointing at it."""
+    """The radius is an option. Deriving the unique_id from it would rename the
+    entity to _2 and orphan the original every time someone tuned it, silently
+    breaking any card or automation pointing at it."""
     config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(config_entry.entry_id)
     await hass.async_block_till_done()
 
     registry = er.async_get(hass)
-    before = registry.async_get(LIGHTNING).unique_id
+    before = registry.async_get(NEAREST).unique_id
 
     hass.config_entries.async_update_entry(
-        config_entry, options={**config_entry.options, CONF_GLM_PRECISION: 5}
+        config_entry, options={**config_entry.options, CONF_GLM_RADIUS: 10}
     )
     await hass.async_block_till_done()
 
-    assert registry.async_get(LIGHTNING).unique_id == before
-    assert hass.states.get(f"{LIGHTNING}_2") is None
-    # The box it reads really did change; only the identity held still.
+    assert registry.async_get(NEAREST).unique_id == before
+    assert hass.states.get(f"{NEAREST}_2") is None
     config_entry.runtime_data._handle_connection(True)
     await hass.async_block_till_done()
-    assert hass.states.get(LIGHTNING).attributes["geohash"] == "dj6n7"
+    assert hass.states.get(NEAREST).attributes["radius_mi"] == 10
 
 
-async def test_every_zone_gets_a_lightning_sensor(
+async def test_the_alert_ring_keeps_its_identity_when_retuned(
+    hass, config_entry, mock_feed_client, enable_custom_integrations
+):
+    """The binary sensor's *name* carries the distance, so it is renamed — but
+    its identity must not move, or every automation loses its trigger."""
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    before = registry.async_get(NEARBY).unique_id
+
+    hass.config_entries.async_update_entry(
+        config_entry, options={**config_entry.options, CONF_GLM_ALERT: 5}
+    )
+    await hass.async_block_till_done()
+
+    assert registry.async_get(NEARBY).unique_id == before
+
+
+async def test_every_zone_gets_its_own_proximity_set(
     hass, mock_feed_client, enable_custom_integrations
 ):
-    """Two zones in one geohash box must both get a sensor. Deduplicating by
-    box left the second zone with none at all."""
+    """Two zones close enough to share coverage must both get sensors."""
     from pytest_homeassistant_custom_component.common import MockConfigEntry
 
     neighbour = {
         **LOCATION_SANTA_ROSA,
         "zone_entity_id": "zone.work",
         "name": "Work",
-        "geohash": "dj6n8",  # same dj6 box, different leaf
+        "latitude": 30.70,
     }
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -277,7 +355,7 @@ async def test_every_zone_gets_a_lightning_sensor(
             CONF_ENABLE_ALERTS: False,
             CONF_ENABLE_GLM: True,
         },
-        options={CONF_GLM_PRECISION: 3},
+        options={CONF_GLM_RADIUS: 30, CONF_GLM_ALERT: 10},
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -285,8 +363,26 @@ async def test_every_zone_gets_a_lightning_sensor(
     entry.runtime_data._handle_connection(True)
     await hass.async_block_till_done()
 
-    assert hass.states.get(LIGHTNING) is not None
-    assert hass.states.get("sensor.wxalerts_work_lightning_flashes") is not None
+    assert hass.states.get(NEAREST) is not None
+    assert hass.states.get("sensor.lightning_work_nearest_strike") is not None
+
+
+async def test_lightning_goes_unavailable_when_the_feed_goes_stale(
+    hass, setup_integration
+):
+    """A confident zero during an outage looks exactly like calm weather."""
+    await feed(hass, setup_integration, TOPIC_GLM_LEAF, encode(fresh_burst()))
+    assert hass.states.get(RING_10).state == "2"
+
+    await feed(
+        hass,
+        setup_integration,
+        TOPIC_GLM_STATUS,
+        encode({"healthy": True, "last_granule_age_seconds": 4000}),
+    )
+
+    assert hass.states.get(RING_10).state == STATE_UNAVAILABLE
+    assert hass.states.get(NEARBY).state == STATE_UNAVAILABLE
 
 
 async def test_lightning_does_not_touch_the_alert_entities(hass, setup_integration):
@@ -427,7 +523,7 @@ async def test_lightning_only_setup_creates_no_alert_entities(
             CONF_ENABLE_ALERTS: False,
             CONF_ENABLE_GLM: True,
         },
-        options={CONF_GLM_PRECISION: 3},
+        options={CONF_GLM_RADIUS: 30, CONF_GLM_ALERT: 10},
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -435,7 +531,7 @@ async def test_lightning_only_setup_creates_no_alert_entities(
     entry.runtime_data._handle_connection(True)
     await hass.async_block_till_done()
 
-    assert hass.states.get(LIGHTNING) is not None
+    assert hass.states.get(NEAREST) is not None
     assert hass.states.get(ACTIVE_ALERT) is None
     assert hass.states.get(SEVERITY) is None
     assert geo_entities(hass) == []
@@ -461,7 +557,7 @@ async def test_alerts_only_setup_creates_no_lightning_sensor(
     await hass.async_block_till_done()
 
     assert hass.states.get(ACTIVE_ALERT) is not None
-    assert hass.states.get(LIGHTNING) is None
+    assert hass.states.get(NEAREST) is None
 
 
 async def test_phenomenon_sensors_can_be_turned_off(

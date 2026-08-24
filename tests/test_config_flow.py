@@ -15,7 +15,9 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.wxalerts.const import (
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
-    CONF_GLM_PRECISION,
+    CONF_GLM_ALERT,
+    CONF_GLM_PERSONS,
+    CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
     CONF_LOCATIONS,
     CONF_PHENOMENON_SENSORS,
@@ -333,7 +335,9 @@ async def test_options_flow_re_resolves_zones(
             CONF_ZONES: ["zone.home", "zone.cabin"],
             CONF_ENABLE_ALERTS: True,
             CONF_ENABLE_GLM: True,
-            CONF_GLM_PRECISION: 5,
+            CONF_GLM_RADIUS: 20,
+            CONF_GLM_ALERT: 5,
+            CONF_GLM_PERSONS: False,
             CONF_GLM_WINDOW: 30,
             CONF_PHENOMENON_SENSORS: False,
         },
@@ -345,7 +349,8 @@ async def test_options_flow_re_resolves_zones(
         SAME_SANTA_ROSA,
         SAME_AUTAUGA,
     ]
-    assert entry.options[CONF_GLM_PRECISION] == 5
+    assert entry.options[CONF_GLM_RADIUS] == 20
+    assert entry.options[CONF_GLM_ALERT] == 5
     assert entry.options[CONF_GLM_WINDOW] == 30
 
 
@@ -373,7 +378,9 @@ async def test_options_flow_rejects_a_selection_with_no_usable_zone(
             CONF_ZONES: ["zone.nowhere"],
             CONF_ENABLE_ALERTS: True,
             CONF_ENABLE_GLM: True,
-            CONF_GLM_PRECISION: 4,
+            CONF_GLM_RADIUS: 30,
+            CONF_GLM_ALERT: 10,
+            CONF_GLM_PERSONS: False,
             CONF_GLM_WINDOW: 15,
             CONF_PHENOMENON_SENSORS: True,
         },
@@ -411,7 +418,9 @@ async def test_changing_options_reloads_the_entry(
             CONF_ZONES: ["zone.home"],
             CONF_ENABLE_ALERTS: True,
             CONF_ENABLE_GLM: True,
-            CONF_GLM_PRECISION: 3,
+            CONF_GLM_RADIUS: 30,
+            CONF_GLM_ALERT: 10,
+            CONF_GLM_PERSONS: False,
             CONF_GLM_WINDOW: 45,
             CONF_PHENOMENON_SENSORS: True,
         },

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.0
+
+Lightning becomes a proximity feed rather than a box counter.
+
+**Breaking.** The single `Lightning flashes` sensor per zone is replaced by a
+proximity set per target, on its own `Lightning — <name>` device: nearest
+strike, ring counts at 5/10/20/30 miles, strike rate, minutes since the last
+strike, a trend label, and a `Lightning within <n>mi` binary sensor with
+`device_class: safety`. The old entity has no successor and will show as
+unavailable; remove it. Dashboard cards and automations pointing at it need
+repointing.
+
+The `Lightning box size` option is gone, replaced by a **radius** and a
+**seek-shelter distance**. The subscription is now derived from the radius
+instead of being chosen by hand.
+
+- **The box was never centred on you.** Geohash cells are aligned to the globe,
+  so the cell containing a location sits wherever the grid puts it. A station
+  4 miles from its cell's southern edge was blind to strikes past that edge —
+  well inside the ten-mile ring, and typically the direction weather arrives
+  from. Coverage is now the set of cells the radius actually reaches, and each
+  flash is filtered by true great-circle distance rather than by cell
+  membership.
+- **The window is measured on each flash's own timestamp**, not on when it
+  arrived. A delayed or replayed granule now lands in the window it belongs to
+  instead of looking like it just happened.
+- **A stale feed reports `unavailable`, not zero.** The integration subscribes
+  to the ingest's retained heartbeat and goes unavailable when the feed ages
+  out. A confident zero during an outage is indistinguishable from calm
+  weather, and an outage is most likely exactly when it matters.
+- **People can be targets.** Enable *Also track people* and every `person` with
+  a GPS fix gets their own lightning device, re-measured as they move. Coverage
+  follows them without dropping the broker session; someone with no fix is
+  skipped rather than reported at a stale position.
+- Trimming coverage to fit the broker's subscription cap is logged with what
+  was dropped, because a dropped cell is a direction the sensor cannot see.
+
 ## 0.2.1
 
 Fixes entity identity, found while testing the 0.2.0 install end to end.

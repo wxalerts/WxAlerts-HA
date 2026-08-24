@@ -24,7 +24,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.wxalerts.const import (
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
-    CONF_GLM_PRECISION,
+    CONF_GLM_ALERT,
+    CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
     CONF_LOCATIONS,
     CONF_ZONES,
@@ -61,9 +62,9 @@ def live_entry() -> MockConfigEntry:
             CONF_ENABLE_ALERTS: True,
             CONF_ENABLE_GLM: True,
         },
-        # Precision 3 is a wide box, so lightning somewhere in the Gulf is
-        # likely enough to be worth reporting on.
-        options={CONF_GLM_PRECISION: 3, CONF_GLM_WINDOW: 15},
+        # A wide radius, so lightning somewhere in the Gulf is likely enough
+        # to be worth reporting on.
+        options={CONF_GLM_RADIUS: 50, CONF_GLM_ALERT: 10, CONF_GLM_WINDOW: 15},
     )
 
 
@@ -131,7 +132,9 @@ async def test_entities_reflect_the_live_feed(hass, live_integration):
         "binary_sensor.wxalerts_home_active_alert",
         "sensor.wxalerts_home_highest_severity",
         "sensor.wxalerts_home_active_alerts",
-        "sensor.wxalerts_home_lightning_flashes",
+        "sensor.lightning_home_strikes_10mi",
+        "sensor.lightning_home_trend",
+        "binary_sensor.lightning_home_lightning_within_10mi",
     ):
         state = hass.states.get(entity_id)
         assert state is not None, entity_id
@@ -183,14 +186,17 @@ async def test_live_lightning(hass, live_integration):
     await asyncio.sleep(20)  # a granule is 20 s
     await hass.async_block_till_done()
 
-    state = hass.states.get("sensor.wxalerts_home_lightning_flashes")
+    state = hass.states.get("sensor.lightning_home_strikes_30mi")
     flashes = int(state.state)
-    print(f"\nlive: {flashes} flash(es) in box {state.attributes['geohash']}")
+    nearest = hass.states.get("sensor.lightning_home_nearest_strike")
+    print(f"\nlive: {flashes} flash(es) within 30 mi, nearest {nearest.state}")
 
     assert flashes >= 0
-    for flash in live_integration.recent_flashes(state.attributes["geohash"]):
+    for flash in live_integration.recent_flashes("zone.home"):
         assert -90 <= flash["latitude"] <= 90
         assert -180 <= flash["longitude"] <= 180
+        # The whole point of the radius: nothing outside it may be reported.
+        assert flash["distance_mi"] <= live_integration.glm_radius_mi
 
     if flashes == 0:
-        pytest.skip("no lightning in the configured box right now")
+        pytest.skip("no lightning within the configured radius right now")

@@ -1,6 +1,7 @@
-"""Binary sensors: any-active-alert per county, plus optional
-per-phenomenon sensors (tornado, severe thunderstorm, ...) that read far
-better in automations than string-matching attributes.
+"""Binary sensors: any-active-alert per county, optional per-phenomenon sensors
+(tornado, severe thunderstorm, ...) that read far better in automations than
+string-matching attributes, and the lightning proximity sensor that a
+seek-shelter automation triggers on.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import WxAlertsConfigEntry
@@ -23,7 +24,8 @@ from .const import (
     PHENOMENON_SENSOR_TYPES,
 )
 from .coordinator import WxAlertsCoordinator
-from .entity import WxAlertsLocationEntity
+from .entity import WxAlertsLocationEntity, WxAlertsTargetEntity
+from .lightning import Target
 
 
 async def async_setup_entry(
@@ -32,7 +34,24 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
+    entities: list[BinarySensorEntity] = []
+
+    if coordinator.enable_glm:
+        entities.extend(
+            LightningNearbyBinarySensor(coordinator, target)
+            for target in coordinator.targets
+        )
+
+        @callback
+        def _targets_added(targets: list[Target]) -> None:
+            async_add_entities(
+                LightningNearbyBinarySensor(coordinator, target) for target in targets
+            )
+
+        entry.async_on_unload(coordinator.add_target_listener(_targets_added))
+
     if not coordinator.enable_alerts:
+        async_add_entities(entities)
         return
 
     options = {**entry.data, **entry.options}
@@ -40,7 +59,6 @@ async def async_setup_entry(
         CONF_PHENOMENON_SENSORS, DEFAULT_PHENOMENON_SENSORS
     )
 
-    entities: list[BinarySensorEntity] = []
     seen_same: set[str] = set()
     for location in coordinator.locations:
         same = location.get(LOC_SAME)
@@ -120,3 +138,45 @@ class PhenomenonBinarySensor(WxAlertsLocationEntity, BinarySensorEntity):
             if alert.get("phenomena") == self._phenomenon
         ]
         return {"phenomenon": self._phenomenon, "alerts": live}
+
+
+class LightningNearbyBinarySensor(WxAlertsTargetEntity, BinarySensorEntity):
+    """On when the closest flash is inside the alert radius.
+
+    ``device_class: safety`` because this is the entity a seek-shelter
+    automation triggers on, and it is the reason the whole proximity set exists:
+    everything else on the lightning device is context for this one bit.
+
+    Automations should trigger ``from: "off"`` rather than on any change to on.
+    A stale feed makes this unavailable, so an ``unavailable -> on`` transition
+    means the feed recovered, not that the sky changed.
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.SAFETY
+
+    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
+        super().__init__(coordinator, target)
+        alert = int(coordinator.glm_alert_mi)
+        self._attr_name = f"Lightning within {alert}mi"
+        # Identity is the target, never the radius: keying on the alert
+        # distance would orphan the sensor the first time it was tuned.
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_glm_{target.key}_nearby"
+
+    @property
+    def is_on(self) -> bool:
+        return self.metrics.nearby
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        metrics = self.metrics
+        return {
+            "target": self._target_name,
+            "alert_mi": self.coordinator.glm_alert_mi,
+            "nearest_mi": metrics.nearest_mi,
+            "trend": metrics.trend,
+            "feed_age_seconds": (
+                None
+                if self.coordinator.glm_feed_age is None
+                else round(self.coordinator.glm_feed_age)
+            ),
+        }

@@ -15,6 +15,9 @@ DEFAULT_PASSWORD = "wxalerts"
 
 TOPIC_SAME_FMT = "wxalerts/nws/v1/same/{same}/#"
 TOPIC_GLM_ROOT = "wxalerts/glm/v1"
+# Retained heartbeat from the lightning ingest. Four levels, so it can never be
+# confused with a flash burst (which is always eight).
+TOPIC_GLM_STATUS = "wxalerts/glm/v1/status"
 
 # Broker enforces 20 subscriptions per client; leave headroom.
 MAX_SUBSCRIPTIONS = 18
@@ -26,8 +29,11 @@ CONF_LOCATIONS = "locations"  # list of resolved location dicts
 CONF_ZONES = "zones"  # zone entity_ids picked in the flow
 CONF_ENABLE_ALERTS = "enable_alerts"
 CONF_ENABLE_GLM = "enable_glm"
-CONF_GLM_PRECISION = "glm_precision"  # geohash chars used for subscription
+CONF_GLM_PRECISION = "glm_precision"  # legacy: geohash chars, migrated to radius
+CONF_GLM_RADIUS = "glm_radius_mi"  # outer ring, and what the subscription covers
+CONF_GLM_ALERT = "glm_alert_mi"  # drives the safety binary sensor
 CONF_GLM_WINDOW = "glm_window_minutes"
+CONF_GLM_PERSONS = "glm_track_persons"
 CONF_PHENOMENON_SENSORS = "phenomenon_sensors"
 
 # Per-location dict keys (stored in the config entry)
@@ -42,10 +48,37 @@ LOC_GEOHASH = "geohash"
 
 DEFAULT_ENABLE_ALERTS = True
 DEFAULT_ENABLE_GLM = True
-# 4 geohash characters ~= a 39 km x 19.5 km box — county scale.
-DEFAULT_GLM_PRECISION = 4
-DEFAULT_GLM_WINDOW = 15
+# 30 miles is the outer ring the rate and trend are measured over; 10 miles is
+# the NWS "when thunder roars" seek-shelter distance and the one that fires the
+# safety sensor. Neither is a box size — the subscription is derived from them.
+DEFAULT_GLM_RADIUS = 30
+DEFAULT_GLM_ALERT = 10
+DEFAULT_GLM_WINDOW = 30
+DEFAULT_GLM_PERSONS = False
 DEFAULT_PHENOMENON_SENSORS = True
+
+# Ring counts published as their own sensors, in miles. Rings at or beyond the
+# configured radius are dropped rather than reported as a smaller circle.
+RING_MILES = (5, 10, 20, 30)
+
+# Nearest-distance history depth and minimum spacing for the trend label.
+# Comparing first against last over several samples means one flash on the far
+# edge of a cell cannot flip "Approaching", the way consecutive samples would.
+TREND_SAMPLES = 5
+TREND_MIN_INTERVAL = 40.0
+TREND_APPROACHING = "Approaching"
+TREND_RECEDING = "Receding"
+TREND_STEADY = "Steady"
+TREND_UNKNOWN = "Unknown"
+TREND_OPTIONS = [TREND_APPROACHING, TREND_RECEDING, TREND_STEADY, TREND_UNKNOWN]
+# A nearest-strike distance has to move by more than this between the first and
+# last sample to count as approaching or receding rather than steady.
+TREND_DELTA_MI = 1.0
+
+# Feed age past which lightning entities go unavailable rather than reporting a
+# calm zero. A confident zero during an outage is the dangerous failure mode:
+# absence of data has to look different from absence of lightning.
+GLM_STALE_SECONDS = 600
 
 # ---------------------------------------------------------------------------
 # Events / dispatcher signals
@@ -53,7 +86,7 @@ DEFAULT_PHENOMENON_SENSORS = True
 EVENT_ALERT = "wxalerts_alert"
 
 SIGNAL_ALERTS_UPDATED = f"{DOMAIN}_alerts_updated"  # + _{entry_id}_{same}
-SIGNAL_GLM_UPDATED = f"{DOMAIN}_glm_updated"  # + _{entry_id}_{geohash}
+SIGNAL_GLM_UPDATED = f"{DOMAIN}_glm_updated"  # + _{entry_id}_{target_key}
 SIGNAL_CONNECTION = f"{DOMAIN}_connection"  # + _{entry_id}
 
 # ---------------------------------------------------------------------------

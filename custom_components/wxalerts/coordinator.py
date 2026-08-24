@@ -16,7 +16,6 @@ import json
 import logging
 import ssl
 import time
-from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,18 +25,23 @@ import aiomqtt
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.instance_id import async_get as async_get_instance_id
 from homeassistant.util.ssl import get_default_context
 
 from .const import (
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
-    CONF_GLM_PRECISION,
+    CONF_GLM_ALERT,
+    CONF_GLM_PERSONS,
+    CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
     CONF_LOCATIONS,
     DEFAULT_ENABLE_ALERTS,
     DEFAULT_ENABLE_GLM,
-    DEFAULT_GLM_PRECISION,
+    DEFAULT_GLM_ALERT,
+    DEFAULT_GLM_PERSONS,
+    DEFAULT_GLM_RADIUS,
     DEFAULT_GLM_WINDOW,
     DEFAULT_HOST,
     DEFAULT_PASSWORD,
@@ -45,17 +49,32 @@ from .const import (
     DEFAULT_USERNAME,
     DEFAULT_WS_PATH,
     EVENT_ALERT,
-    LOC_GEOHASH,
+    GLM_STALE_SECONDS,
+    LOC_LAT,
+    LOC_LON,
+    LOC_NAME,
     LOC_SAME,
+    LOC_ZONE_ENTITY,
     MAX_SUBSCRIPTIONS,
+    RING_MILES,
     SEVERITY_NONE,
     SEVERITY_ORDER,
     SIGNAL_ALERTS_UPDATED,
     SIGNAL_CONNECTION,
     SIGNAL_GLM_UPDATED,
+    TOPIC_GLM_STATUS,
     TOPIC_SAME_FMT,
 )
-from .geo import glm_topic_for_geohash
+from .geo import glm_topic_for_geohash, haversine_miles, plan_coverage
+from .lightning import (
+    Flash,
+    FlashStore,
+    Metrics,
+    Target,
+    TrendTracker,
+    compute,
+    parse_flash_time,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -109,10 +128,39 @@ class FeedClient:
         self._on_connection = on_connection
         self._task: asyncio.Task | None = None
         self._stopping = False
+        # The live client, so subscriptions can follow a moving target without
+        # tearing the session down. Reconnecting to change one topic would
+        # replay every retained hazard and re-prime the event window.
+        self._client: aiomqtt.Client | None = None
 
     def start(self) -> None:
         self._stopping = False
         self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def set_subscriptions(self, subscriptions: list[tuple[str, int]]) -> None:
+        """Move the live session onto a new topic set.
+
+        Subscribes to what is new before unsubscribing from what is gone, so a
+        target that stays covered never has a gap. If the session is down this
+        only records the new set; the next connect uses it.
+        """
+        previous = {topic for topic, _ in self._config.subscriptions}
+        wanted = {topic for topic, _ in subscriptions}
+        self._config.subscriptions = subscriptions
+
+        client = self._client
+        if client is None:
+            return
+        try:
+            for topic, qos in subscriptions:
+                if topic not in previous:
+                    await client.subscribe(topic, qos=qos)
+            for topic in previous - wanted:
+                await client.unsubscribe(topic)
+        except aiomqtt.MqttError as err:
+            # The reconnect path re-subscribes from the stored set, so a failure
+            # here costs a round trip, not correctness.
+            _LOGGER.debug("Live subscription update failed: %s", err)
 
     async def stop(self) -> None:
         self._stopping = True
@@ -153,8 +201,9 @@ class FeedClient:
                     clean_start=True,
                 ) as client:
                     connected_at = time.monotonic()
+                    self._client = client
                     self._on_connection(True)
-                    for topic, qos in self._config.subscriptions:
+                    for topic, qos in list(self._config.subscriptions):
                         await client.subscribe(topic, qos=qos)
                     # Reading the stream is also our liveness check: a held
                     # session with an unread socket does not detect death.
@@ -170,6 +219,7 @@ class FeedClient:
             except Exception:  # noqa: BLE001 - never let the loop die silently
                 _LOGGER.exception("Unexpected error in feed loop")
             finally:
+                self._client = None
                 self._on_connection(False)
             if self._stopping:
                 return
@@ -194,11 +244,18 @@ class WxAlertsCoordinator:
             CONF_ENABLE_ALERTS, DEFAULT_ENABLE_ALERTS
         )
         self.enable_glm: bool = options.get(CONF_ENABLE_GLM, DEFAULT_ENABLE_GLM)
-        self.glm_precision: int = int(
-            options.get(CONF_GLM_PRECISION, DEFAULT_GLM_PRECISION)
+        self.glm_radius_mi: float = float(
+            options.get(CONF_GLM_RADIUS, DEFAULT_GLM_RADIUS)
         )
+        self.glm_alert_mi: float = float(options.get(CONF_GLM_ALERT, DEFAULT_GLM_ALERT))
         self.glm_window_minutes: int = int(
             options.get(CONF_GLM_WINDOW, DEFAULT_GLM_WINDOW)
+        )
+        self.glm_track_persons: bool = bool(
+            options.get(CONF_GLM_PERSONS, DEFAULT_GLM_PERSONS)
+        )
+        self.glm_rings: tuple[int, ...] = tuple(
+            ring for ring in RING_MILES if ring <= self.glm_radius_mi
         )
 
         # Alert state, keyed county -> full topic -> payload. The ETN is the
@@ -211,8 +268,28 @@ class WxAlertsCoordinator:
         # Monotonic deadline for the retained-burst window; see _PRIMING_SECONDS.
         self._priming_until: float = 0.0
 
-        # Lightning, keyed by subscribed geohash prefix -> recent flashes.
-        self._flashes: dict[str, deque[dict[str, Any]]] = {}
+        # One shared window of flashes; every target measures its own distance
+        # against it rather than keeping a private copy of the same storm.
+        self._store = FlashStore(self.glm_window_minutes)
+        self._trend = TrendTracker()
+        self._metrics: dict[str, Metrics] = {}
+        self._targets: dict[str, Target] = {}
+        self._cells: list[str] = []
+        self.glm_precision: int = 0  # chosen by plan_coverage, not configured
+        self.glm_dropped_cells: int = 0
+        # Feed liveness, from the ingest's retained heartbeat when it publishes
+        # one and from flash arrivals otherwise.
+        self._glm_heartbeat: float | None = None
+        self._glm_last_message: float | None = None
+        # Tri-state on purpose. None means the ingest has never said anything,
+        # which is the only case the startup grace period applies to; an
+        # explicit False is stronger evidence than silence and must not fall
+        # through to "assume fine".
+        self._glm_feed_ok: bool | None = None
+        self._unsub_persons: Callable[[], None] | None = None
+        # Platforms register here so a person who appears after setup gets
+        # entities without a restart.
+        self._target_listeners: list[Callable[[list[Target]], None]] = []
 
         self._client: FeedClient | None = None
 
@@ -229,30 +306,169 @@ class WxAlertsCoordinator:
                 seen.append(code)
         return seen
 
+    # ------------------------------------------------------------------
+    # Lightning targets and coverage
+    # ------------------------------------------------------------------
+
     @property
-    def glm_prefixes(self) -> list[str]:
-        seen: list[str] = []
-        for loc in self.locations:
-            full = loc.get(LOC_GEOHASH) or ""
-            prefix = full[: self.glm_precision]
-            if prefix and prefix not in seen:
-                seen.append(prefix)
-        return seen
+    def targets(self) -> list[Target]:
+        """Everywhere proximity is measured, zones first then people."""
+        return list(self._targets.values())
+
+    def target(self, key: str) -> Target | None:
+        return self._targets.get(key)
+
+    def _zone_targets(self) -> list[Target]:
+        targets: list[Target] = []
+        for location in self.locations:
+            lat = location.get(LOC_LAT)
+            lon = location.get(LOC_LON)
+            if lat is None or lon is None:
+                continue
+            key = location.get(LOC_ZONE_ENTITY) or location.get(LOC_NAME) or ""
+            if not key:
+                continue
+            targets.append(
+                Target(
+                    key=key,
+                    name=location.get(LOC_NAME) or key,
+                    latitude=float(lat),
+                    longitude=float(lon),
+                    kind="zone",
+                    location=location,
+                )
+            )
+        return targets
+
+    def _person_targets(self) -> list[Target]:
+        """Every ``person`` with a current GPS fix.
+
+        Read from the state machine each time rather than from configuration:
+        adding someone to Home Assistant is then all that is needed, and someone
+        who has no fix is skipped instead of being reported at a stale position.
+        """
+        if not self.glm_track_persons:
+            return []
+        targets: list[Target] = []
+        for state in self.hass.states.async_all("person"):
+            lat = state.attributes.get("latitude")
+            lon = state.attributes.get("longitude")
+            if lat is None or lon is None:
+                continue
+            targets.append(
+                Target(
+                    key=state.entity_id,
+                    name=state.attributes.get("friendly_name") or state.entity_id,
+                    latitude=float(lat),
+                    longitude=float(lon),
+                    kind="person",
+                )
+            )
+        return targets
+
+    def prepare(self) -> None:
+        """Resolve targets before the platforms are set up.
+
+        Separate from ``async_start`` because the platforms build one entity per
+        target and are forwarded before the broker session opens; resolving
+        inside the connect path would set them up against an empty list.
+        """
+        self._refresh_targets()
+
+    @callback
+    def add_target_listener(
+        self, listener: Callable[[list[Target]], None]
+    ) -> Callable[[], None]:
+        """Be told about targets that appear after setup."""
+        self._target_listeners.append(listener)
+
+        def _remove() -> None:
+            if listener in self._target_listeners:
+                self._target_listeners.remove(listener)
+
+        return _remove
+
+    def _refresh_targets(self) -> bool:
+        """Rebuild the target list. True if the covered cell set changed."""
+        targets = {t.key: t for t in self._zone_targets()}
+        for person in self._person_targets():
+            targets.setdefault(person.key, person)
+        added = [t for key, t in targets.items() if key not in self._targets]
+        self._targets = targets
+        self._trend.forget(set(targets))
+        for stale in set(self._metrics) - set(targets):
+            del self._metrics[stale]
+
+        if added:
+            for listener in list(self._target_listeners):
+                listener(added)
+
+        cells = self._plan_cells()
+        changed = cells != self._cells
+        self._cells = cells
+        return changed
+
+    def _plan_cells(self) -> list[str]:
+        """The geohash cells the configured radius reaches, for every target.
+
+        The budget is split evenly so one target cannot starve the others, then
+        the union is trimmed if it still overruns. Coverage is never narrowed
+        silently — a dropped cell is a direction the sensor is blind in.
+        """
+        if not self.enable_glm or not self._targets:
+            self.glm_dropped_cells = 0
+            return []
+
+        budget = max(1, MAX_SUBSCRIPTIONS - len(self.same_codes) - 1)
+        per_target = max(1, budget // max(1, len(self._targets)))
+
+        ordered: list[str] = []
+        precisions: list[int] = []
+        for target in self._targets.values():
+            precision, cells = plan_coverage(
+                target.latitude, target.longitude, self.glm_radius_mi, per_target
+            )
+            precisions.append(precision)
+            for cell in cells:
+                if cell not in ordered:
+                    ordered.append(cell)
+        self.glm_precision = min(precisions) if precisions else 0
+
+        self.glm_dropped_cells = max(0, len(ordered) - budget)
+        if self.glm_dropped_cells:
+            _LOGGER.warning(
+                "Lightning coverage needs %d geohash cells for %d target(s) at "
+                "%.0f miles but only %d subscriptions are available; dropping "
+                "the %d furthest. Reduce the radius or track fewer targets — "
+                "those directions are now unmonitored",
+                len(ordered),
+                len(self._targets),
+                self.glm_radius_mi,
+                budget,
+                self.glm_dropped_cells,
+            )
+        return ordered[:budget]
 
     def _build_subscriptions(self) -> list[tuple[str, int]]:
         subs: list[tuple[str, int]] = []
         if self.enable_alerts:
             for code in self.same_codes:
                 subs.append((TOPIC_SAME_FMT.format(same=code), 1))
-        if self.enable_glm:
-            for prefix in self.glm_prefixes:
-                subs.append((glm_topic_for_geohash(prefix), 0))
+        if self.enable_glm and self._cells:
+            # The heartbeat first: without it a stalled ingest is indis-
+            # tinguishable from calm weather, which is the one failure this
+            # sensor must never have. Only worth subscribing to alongside
+            # actual coverage — on its own it monitors nothing.
+            subs.append((TOPIC_GLM_STATUS, 1))
+            for cell in self._cells:
+                subs.append((glm_topic_for_geohash(cell), 0))
         if len(subs) > MAX_SUBSCRIPTIONS:
-            # The broker caps subscriptions per client at 20. Keep alerts,
-            # trim lightning boxes, and say so instead of failing silently.
+            # The broker caps subscriptions per client at 20. Keep alerts and
+            # the heartbeat, trim coverage, and say so instead of failing
+            # silently.
             _LOGGER.warning(
                 "Configuration needs %d subscriptions but the broker allows %d; "
-                "dropping the last %d lightning subscriptions",
+                "dropping the last %d lightning cells",
                 len(subs),
                 MAX_SUBSCRIPTIONS,
                 len(subs) - MAX_SUBSCRIPTIONS,
@@ -261,6 +477,14 @@ class WxAlertsCoordinator:
         return subs
 
     async def async_start(self) -> None:
+        if self.enable_glm and self.glm_track_persons:
+            # Every person, not only those with a fix now: someone who arrives
+            # home and gains a fix has to start being measured.
+            self._unsub_persons = async_track_state_change_event(
+                self.hass,
+                [state.entity_id for state in self.hass.states.async_all("person")],
+                self._handle_person_moved,
+            )
         instance_id = await async_get_instance_id(self.hass)
         config = FeedConfig(
             client_id=f"wxha-{instance_id[:12]}-{self.entry.entry_id[:8]}",
@@ -276,9 +500,28 @@ class WxAlertsCoordinator:
         self._client.start()
 
     async def async_stop(self) -> None:
+        if self._unsub_persons:
+            self._unsub_persons()
+            self._unsub_persons = None
         if self._client:
             await self._client.stop()
             self._client = None
+
+    @callback
+    def _handle_person_moved(self, _event: Any) -> None:
+        """Re-plan coverage when a tracked person moves.
+
+        Only a change to the *cell set* costs anything, so ordinary movement
+        inside the covered area does not touch the broker. Metrics are always
+        recomputed, because the person has moved relative to the same flashes.
+        """
+        if not self.enable_glm:
+            return
+        if self._refresh_targets() and self._client:
+            self.hass.async_create_task(
+                self._client.set_subscriptions(self._build_subscriptions())
+            )
+        self._recompute_all()
 
     # ------------------------------------------------------------------
     # Message handling
@@ -299,6 +542,8 @@ class WxAlertsCoordinator:
         parts = topic.split("/")
         if topic.startswith("wxalerts/nws/v1/same/") and len(parts) >= 6:
             self._handle_alert(topic, parts[4], payload)
+        elif topic == TOPIC_GLM_STATUS:
+            self._handle_glm_status(payload)
         elif topic.startswith("wxalerts/glm/v1/") and len(parts) == 8:
             self._handle_glm("".join(parts[3:8]), payload)
 
@@ -356,6 +601,37 @@ class WxAlertsCoordinator:
             self.hass, f"{SIGNAL_ALERTS_UPDATED}_{self.entry.entry_id}_{same}"
         )
 
+    def _handle_glm_status(self, payload: bytes) -> None:
+        """Retained heartbeat from the lightning ingest.
+
+        Its own view of whether NOAA is still delivering is better than ours:
+        we cannot tell a quiet sky from a dead feed, and it can.
+        """
+        if not payload:
+            # The heartbeat was cleared rather than contradicted; fall back to
+            # flash arrivals instead of declaring the feed dead.
+            self._glm_heartbeat = None
+            self._glm_feed_ok = None
+            self._recompute_all()
+            return
+        try:
+            status = json.loads(payload)
+        except ValueError:
+            _LOGGER.warning("Undecodable lightning heartbeat")
+            return
+
+        age = status.get("last_granule_age_seconds")
+        healthy = status.get("healthy", status.get("feed", True))
+        now = time.time()
+        self._glm_feed_ok = healthy is not False
+        if healthy is False:
+            self._glm_heartbeat = None
+        elif isinstance(age, (int, float)) and age >= 0:
+            self._glm_heartbeat = now - float(age)
+        else:
+            self._glm_heartbeat = now
+        self._recompute_all()
+
     def _handle_glm(self, leaf_geohash: str, payload: bytes) -> None:
         if not payload:
             return  # GLM is stateless; nothing is retained or tombstoned
@@ -363,36 +639,55 @@ class WxAlertsCoordinator:
             burst = json.loads(payload)
         except ValueError:
             return
-        flashes = burst.get("flashes") or []
-        now = time.time()
-        for prefix in self.glm_prefixes:
-            if not leaf_geohash.startswith(prefix):
-                continue
-            bucket = self._flashes.setdefault(prefix, deque())
-            for flash in flashes:
-                bucket.append(
-                    {
-                        "received": now,
-                        "time": flash.get("t"),
-                        "latitude": flash.get("lat"),
-                        "longitude": flash.get("lon"),
-                        "energy_j": flash.get("energy_j"),
-                        "geohash": leaf_geohash,
-                    }
-                )
-            self._prune_flashes(prefix, now)
-            async_dispatcher_send(
-                self.hass, f"{SIGNAL_GLM_UPDATED}_{self.entry.entry_id}_{prefix}"
-            )
 
-    def _prune_flashes(self, prefix: str, now: float | None = None) -> None:
-        now = now or time.time()
-        cutoff = now - self.glm_window_minutes * 60
-        bucket = self._flashes.get(prefix)
-        if not bucket:
+        now = time.time()
+        self._glm_last_message = now
+        flashes = burst.get("flashes") or []
+        parsed = []
+        for flash in flashes:
+            lat = flash.get("lat")
+            lon = flash.get("lon")
+            if lat is None or lon is None:
+                continue
+            parsed.append(
+                Flash(
+                    when=parse_flash_time(flash.get("t"), now),
+                    latitude=float(lat),
+                    longitude=float(lon),
+                    energy_j=flash.get("energy_j"),
+                )
+            )
+        if not parsed:
             return
-        while bucket and bucket[0]["received"] < cutoff:
-            bucket.popleft()
+
+        self._store.add(parsed)
+        self._recompute_all(now)
+
+    def _recompute_all(self, now: float | None = None) -> None:
+        """Recompute every target against the shared window and dispatch.
+
+        Done centrally rather than lazily in each entity because one burst
+        changes every target at once, and because the trend has to be sampled on
+        a schedule the entities do not control.
+        """
+        now = time.time() if now is None else now
+        self._store.prune(now)
+        for target in self._targets.values():
+            metrics = compute(
+                self._store,
+                target,
+                radius_mi=self.glm_radius_mi,
+                alert_mi=self.glm_alert_mi,
+                rings=self.glm_rings,
+                now=now,
+            )
+            self._trend.sample(target.key, metrics.nearest_mi, now)
+            metrics.trend = self._trend.label(target.key)
+            self._metrics[target.key] = metrics
+            async_dispatcher_send(
+                self.hass,
+                f"{SIGNAL_GLM_UPDATED}_{self.entry.entry_id}_{target.key}",
+            )
 
     # ------------------------------------------------------------------
     # State the entities read
@@ -442,25 +737,76 @@ class WxAlertsCoordinator:
             alert.get("phenomena") == phenomenon for alert in self.alerts_for(same)
         )
 
-    def flash_count(self, prefix: str) -> int:
-        self._prune_flashes(prefix)
-        return len(self._flashes.get(prefix, ()))
+    # ------------------------------------------------------------------
+    # Lightning state the entities read
+    # ------------------------------------------------------------------
 
-    def recent_flashes(self, prefix: str, limit: int = 25) -> list[dict[str, Any]]:
-        self._prune_flashes(prefix)
-        bucket = self._flashes.get(prefix)
-        if not bucket:
+    def metrics_for(self, key: str) -> Metrics:
+        """Proximity metrics for a target; an empty set if it has none yet."""
+        return self._metrics.get(key) or Metrics(
+            rings={ring: 0 for ring in self.glm_rings}
+        )
+
+    @property
+    def glm_feed_age(self) -> float | None:
+        """Seconds since the lightning feed last showed a sign of life.
+
+        The heartbeat is authoritative when present because it reports whether
+        NOAA is still delivering. Without one, flash arrivals are the only
+        evidence available — and they are weak evidence, since a genuinely calm
+        sky produces none either. That asymmetry is why the heartbeat exists.
+        """
+        if self._glm_heartbeat is not None:
+            return max(0.0, time.time() - self._glm_heartbeat)
+        if self._glm_last_message is not None:
+            return max(0.0, time.time() - self._glm_last_message)
+        return None
+
+    @property
+    def glm_available(self) -> bool:
+        """Whether a lightning reading can be trusted.
+
+        A stale feed reports unavailable rather than zero. Reporting a confident
+        zero during an outage is the dangerous failure — it looks exactly like
+        calm weather, and the outage is most likely when the storm is overhead.
+        """
+        if not self.connected:
+            return False
+        if self._glm_feed_ok is False:
+            return False
+        age = self.glm_feed_age
+        if age is None:
+            # Nothing heard yet. Trust the connection during the window it takes
+            # a quiet cell to produce its first message, then stop.
+            return True
+        return age <= GLM_STALE_SECONDS
+
+    @property
+    def glm_window_flashes(self) -> int:
+        """Total flashes held, across every covered cell."""
+        return len(self._store)
+
+    def recent_flashes(self, key: str, limit: int = 25) -> list[dict[str, Any]]:
+        """The closest recent flashes to a target, nearest first."""
+        target = self._targets.get(key)
+        if target is None:
             return []
-        return list(bucket)[-limit:]
 
-    def last_flash_time(self, prefix: str) -> datetime | None:
-        flashes = self.recent_flashes(prefix, limit=1)
-        if not flashes:
-            return None
-        raw = flashes[-1].get("time")
-        if raw:
-            try:
-                return datetime.fromisoformat(raw)
-            except ValueError:
-                pass
-        return datetime.fromtimestamp(flashes[-1]["received"], tz=timezone.utc)
+        scored = []
+        for flash in self._store.flashes():
+            distance = haversine_miles(
+                target.latitude, target.longitude, flash.latitude, flash.longitude
+            )
+            if distance <= self.glm_radius_mi:
+                scored.append((distance, flash))
+        scored.sort(key=lambda pair: pair[0])
+        return [
+            {
+                "distance_mi": round(distance, 1),
+                "latitude": flash.latitude,
+                "longitude": flash.longitude,
+                "energy_j": flash.energy_j,
+                "time": datetime.fromtimestamp(flash.when, tz=timezone.utc).isoformat(),
+            }
+            for distance, flash in scored[:limit]
+        ]

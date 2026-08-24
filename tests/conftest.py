@@ -15,7 +15,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.wxalerts.const import (
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
-    CONF_GLM_PRECISION,
+    CONF_GLM_ALERT,
+    CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
     CONF_LOCATIONS,
     CONF_ZONES,
@@ -58,7 +59,8 @@ def config_entry() -> MockConfigEntry:
             CONF_ENABLE_GLM: True,
         },
         options={
-            CONF_GLM_PRECISION: 3,
+            CONF_GLM_RADIUS: 30,
+            CONF_GLM_ALERT: 10,
             CONF_GLM_WINDOW: 15,
         },
     )

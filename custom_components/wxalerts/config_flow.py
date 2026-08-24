@@ -25,14 +25,18 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
-    CONF_GLM_PRECISION,
+    CONF_GLM_ALERT,
+    CONF_GLM_PERSONS,
+    CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
     CONF_LOCATIONS,
     CONF_PHENOMENON_SENSORS,
     CONF_ZONES,
     DEFAULT_ENABLE_ALERTS,
     DEFAULT_ENABLE_GLM,
-    DEFAULT_GLM_PRECISION,
+    DEFAULT_GLM_ALERT,
+    DEFAULT_GLM_PERSONS,
+    DEFAULT_GLM_RADIUS,
     DEFAULT_GLM_WINDOW,
     DEFAULT_PHENOMENON_SENSORS,
     DOMAIN,
@@ -205,6 +209,11 @@ class WxAlertsOptionsFlow(OptionsFlow):
 
     Zones are re-resolved on save, so moving a zone or adding a county
     never needs a remove/re-add of the integration.
+
+    The lightning settings are distances, not a geohash precision. The
+    subscription is derived from the radius rather than chosen by hand, because
+    the cell containing a location is aligned to the globe and not centred on
+    it — picking a box size by eye reliably leaves a blind arc on one side.
     """
 
     async def async_step_init(
@@ -228,8 +237,12 @@ class WxAlertsOptionsFlow(OptionsFlow):
                         CONF_LOCATIONS: locations,
                         CONF_ENABLE_ALERTS: user_input[CONF_ENABLE_ALERTS],
                         CONF_ENABLE_GLM: user_input[CONF_ENABLE_GLM],
-                        CONF_GLM_PRECISION: user_input[CONF_GLM_PRECISION],
+                        CONF_GLM_RADIUS: user_input[CONF_GLM_RADIUS],
+                        CONF_GLM_ALERT: min(
+                            user_input[CONF_GLM_ALERT], user_input[CONF_GLM_RADIUS]
+                        ),
                         CONF_GLM_WINDOW: user_input[CONF_GLM_WINDOW],
+                        CONF_GLM_PERSONS: user_input[CONF_GLM_PERSONS],
                         CONF_PHENOMENON_SENSORS: user_input[CONF_PHENOMENON_SENSORS],
                     },
                 )
@@ -241,11 +254,27 @@ class WxAlertsOptionsFlow(OptionsFlow):
                 ): _ZONE_SELECTOR,
                 **_feature_schema(current),
                 vol.Required(
-                    CONF_GLM_PRECISION,
-                    default=current.get(CONF_GLM_PRECISION, DEFAULT_GLM_PRECISION),
+                    CONF_GLM_RADIUS,
+                    default=current.get(CONF_GLM_RADIUS, DEFAULT_GLM_RADIUS),
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
-                        min=3, max=5, step=1, mode=selector.NumberSelectorMode.SLIDER
+                        min=5,
+                        max=50,
+                        step=5,
+                        unit_of_measurement="mi",
+                        mode=selector.NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Required(
+                    CONF_GLM_ALERT,
+                    default=current.get(CONF_GLM_ALERT, DEFAULT_GLM_ALERT),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=1,
+                        max=30,
+                        step=1,
+                        unit_of_measurement="mi",
+                        mode=selector.NumberSelectorMode.SLIDER,
                     )
                 ),
                 vol.Required(
@@ -256,6 +285,10 @@ class WxAlertsOptionsFlow(OptionsFlow):
                         min=5, max=60, step=5, mode=selector.NumberSelectorMode.SLIDER
                     )
                 ),
+                vol.Required(
+                    CONF_GLM_PERSONS,
+                    default=current.get(CONF_GLM_PERSONS, DEFAULT_GLM_PERSONS),
+                ): selector.BooleanSelector(),
                 vol.Required(
                     CONF_PHENOMENON_SENSORS,
                     default=current.get(

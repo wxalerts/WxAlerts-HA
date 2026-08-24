@@ -9,6 +9,7 @@ fixtures stay readable. Anything a test asserts on is verbatim.
 from __future__ import annotations
 
 import json
+import time
 
 # --- Topics ---------------------------------------------------------------
 
@@ -153,9 +154,31 @@ GLM_BURST: dict = {
 }
 
 
+# The capture's own wall-clock, so a test can pretend to be standing in it and
+# exercise the verbatim payload against a window measured on flash time.
+GLM_BURST_EPOCH = 1786665464.695584
+
+
 def encode(payload: dict) -> bytes:
     """JSON-encode a payload the way the broker delivers it."""
     return json.dumps(payload).encode()
+
+
+def fresh_burst(*, at: float | None = None, **flash_overrides) -> dict:
+    """``GLM_BURST`` restamped to now.
+
+    The captured timestamps are historical, and the rolling window is measured
+    against each flash's own time rather than when it arrived — so the verbatim
+    fixture is correctly discarded on sight. Proximity tests want flashes that
+    are actually live; the capture stays untouched for the parsing tests.
+    """
+    when = time.time() if at is None else at
+    return {
+        **GLM_BURST,
+        "flashes": [
+            {**flash, "t": when, **flash_overrides} for flash in GLM_BURST["flashes"]
+        ],
+    }
 
 
 TOMBSTONE = b""

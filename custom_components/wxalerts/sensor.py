@@ -1,8 +1,10 @@
-"""Sensors: highest live severity and active-alert count per county, and a
-lightning flash counter per configured geohash box.
+"""Sensors: highest live severity and active-alert count per county, and the
+lightning proximity set per target.
 
-The count sensor carries the full alert list in attributes — that is what a
-Markdown card renders.
+The alert count sensor carries the full alert list in attributes — that is what
+a Markdown card renders. The lightning sensors answer the only question worth
+asking of a lightning feed: how close, how many, how fast, and which way is it
+moving.
 """
 
 from __future__ import annotations
@@ -14,21 +16,22 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.const import UnitOfLength, UnitOfTime
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import WxAlertsConfigEntry
 from .const import (
     LOC_COUNTY,
-    LOC_GEOHASH,
     LOC_NAME,
     LOC_SAME,
-    LOC_ZONE_ENTITY,
     SEVERITY_NONE,
     SEVERITY_ORDER,
+    TREND_OPTIONS,
 )
 from .coordinator import WxAlertsCoordinator
-from .entity import WxAlertsLocationEntity
+from .entity import WxAlertsLocationEntity, WxAlertsTargetEntity
+from .lightning import Target
 
 
 async def async_setup_entry(
@@ -50,15 +53,37 @@ async def async_setup_entry(
             entities.append(AlertCountSensor(coordinator, location))
 
     if coordinator.enable_glm:
-        # One per configured zone, not one per geohash box. Two zones sharing
-        # a box report the same count, which is honest; deduplicating by box
-        # instead would leave the second zone with no lightning sensor at all,
-        # and would tie entity identity to a setting the user can change.
-        for location in coordinator.locations:
-            if location.get(LOC_GEOHASH):
-                entities.append(LightningCountSensor(coordinator, location))
+        # One set per target — a configured zone, or a tracked person. Identity
+        # is the zone or person entity id, which does not move when a setting
+        # changes; keying on the geohash box (as an earlier release did) renamed
+        # every entity whenever the box size was edited.
+        entities.extend(_lightning_sensors(coordinator, coordinator.targets))
+
+        @callback
+        def _targets_added(targets: list[Target]) -> None:
+            # A person who gains a GPS fix after setup is a new target; without
+            # this they would get no entities until the next restart.
+            async_add_entities(_lightning_sensors(coordinator, targets))
+
+        entry.async_on_unload(coordinator.add_target_listener(_targets_added))
 
     async_add_entities(entities)
+
+
+def _lightning_sensors(
+    coordinator: WxAlertsCoordinator, targets: list[Target]
+) -> list[SensorEntity]:
+    entities: list[SensorEntity] = []
+    for target in targets:
+        entities.append(NearestStrikeSensor(coordinator, target))
+        entities.append(StrikeRateSensor(coordinator, target))
+        entities.append(SinceLastStrikeSensor(coordinator, target))
+        entities.append(LightningTrendSensor(coordinator, target))
+        entities.extend(
+            RingCountSensor(coordinator, target, ring)
+            for ring in coordinator.glm_rings
+        )
+    return entities
 
 
 class HighestSeveritySensor(WxAlertsLocationEntity, SensorEntity):
@@ -123,39 +148,141 @@ class AlertCountSensor(WxAlertsLocationEntity, SensorEntity):
         }
 
 
-class LightningCountSensor(WxAlertsLocationEntity, SensorEntity):
-    """GLM flashes in the configured geohash box over the rolling window.
+class _LightningSensor(WxAlertsTargetEntity, SensorEntity):
+    """Common attributes for every proximity sensor."""
 
-    Flash *rate* is the meaningful severe-weather signal — GLM cannot tell
-    cloud-to-ground from intra-cloud, so energy is deliberately not the
-    state. A sharp rise in this value is the documented precursor.
-    """
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_translation_key = "lightning_flashes"
-    _attr_native_unit_of_measurement = "flashes"
     _attr_icon = "mdi:flash"
-
-    def __init__(
-        self, coordinator: WxAlertsCoordinator, location: dict[str, Any]
-    ) -> None:
-        super().__init__(coordinator, location)
-        # Keyed on the zone, never on the geohash prefix: the box size is an
-        # option, and keying identity on it renamed the entity to _2 and
-        # orphaned the original every time someone changed it.
-        zone = location.get(LOC_ZONE_ENTITY) or location.get(LOC_GEOHASH)
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_glm_{zone}"
-
-    @property
-    def native_value(self) -> int:
-        return self.coordinator.flash_count(self.glm_prefix)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        last = self.coordinator.last_flash_time(self.glm_prefix)
+        target = self.target
         return {
-            "geohash": self.glm_prefix,
+            "target": self._target_name,
+            "target_kind": target.kind if target else None,
             "window_minutes": self.coordinator.glm_window_minutes,
-            "last_flash": last.isoformat() if last else None,
-            "location": self.location.get(LOC_NAME),
+            "radius_mi": self.coordinator.glm_radius_mi,
         }
+
+
+class NearestStrikeSensor(_LightningSensor):
+    """Distance to the closest flash in the window.
+
+    Unknown rather than the radius when nothing has been seen: "no lightning
+    within 30 miles" and "lightning exactly 30 miles away" are different
+    answers, and a number cannot carry both.
+    """
+
+    _attr_device_class = SensorDeviceClass.DISTANCE
+    _attr_native_unit_of_measurement = UnitOfLength.MILES
+    _attr_translation_key = "nearest_strike"
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
+        super().__init__(coordinator, target)
+        self._attr_unique_id = (
+            f"{coordinator.entry.entry_id}_glm_{target.key}_nearest"
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        return self.metrics.nearest_mi
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            **super().extra_state_attributes,
+            "closest_flashes": self.coordinator.recent_flashes(self.target_key, 10),
+        }
+
+
+class RingCountSensor(_LightningSensor):
+    """Flashes inside one ring over the window."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "flashes"
+
+    def __init__(
+        self, coordinator: WxAlertsCoordinator, target: Target, ring: int
+    ) -> None:
+        super().__init__(coordinator, target)
+        self._ring = ring
+        self._attr_name = f"Strikes {ring}mi"
+        self._attr_unique_id = (
+            f"{coordinator.entry.entry_id}_glm_{target.key}_ring{ring}"
+        )
+
+    @property
+    def native_value(self) -> int:
+        return self.metrics.rings.get(self._ring, 0)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {**super().extra_state_attributes, "ring_mi": self._ring}
+
+
+class StrikeRateSensor(_LightningSensor):
+    """Flashes per minute inside the outer radius.
+
+    Rate is the severe-weather signal, not energy: GLM cannot tell
+    cloud-to-ground from intra-cloud, so a big energy number says nothing about
+    danger, while a sharp rise in rate is the documented precursor.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "flashes/min"
+    _attr_translation_key = "strike_rate"
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
+        super().__init__(coordinator, target)
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_glm_{target.key}_rate"
+
+    @property
+    def native_value(self) -> float:
+        return self.metrics.rate_per_min
+
+
+class SinceLastStrikeSensor(_LightningSensor):
+    """Minutes since the most recent flash inside the radius.
+
+    This is what a 30-30 style all-clear is built on, so it stays a number in
+    minutes rather than a timestamp an automation would have to subtract.
+    """
+
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_translation_key = "since_last_strike"
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
+        super().__init__(coordinator, target)
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_glm_{target.key}_last"
+
+    @property
+    def native_value(self) -> float | None:
+        return self.metrics.last_strike_min
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        last = self.metrics.last_flash_at
+        return {
+            **super().extra_state_attributes,
+            "last_flash": last.isoformat() if last else None,
+        }
+
+
+class LightningTrendSensor(_LightningSensor):
+    """Approaching / Receding / Steady / Unknown."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = TREND_OPTIONS
+    _attr_translation_key = "lightning_trend"
+    _attr_icon = "mdi:trending-up"
+
+    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
+        super().__init__(coordinator, target)
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_glm_{target.key}_trend"
+
+    @property
+    def native_value(self) -> str:
+        return self.metrics.trend
