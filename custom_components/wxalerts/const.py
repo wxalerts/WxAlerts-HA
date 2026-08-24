@@ -34,6 +34,7 @@ CONF_GLM_RADIUS = "glm_radius_mi"  # outer ring, and what the subscription cover
 CONF_GLM_ALERT = "glm_alert_mi"  # drives the safety binary sensor
 CONF_GLM_WINDOW = "glm_window_minutes"
 CONF_GLM_PERSONS = "glm_track_persons"
+CONF_GLM_BACKFILL = "glm_backfill_url"
 CONF_PHENOMENON_SENSORS = "phenomenon_sensors"
 
 # Per-location dict keys (stored in the config entry)
@@ -55,6 +56,12 @@ DEFAULT_GLM_RADIUS = 30
 DEFAULT_GLM_ALERT = 10
 DEFAULT_GLM_WINDOW = 30
 DEFAULT_GLM_PERSONS = False
+# Blank derives it from the broker host. The endpoint may not be routed on
+# every deployment, so a failed backfill is a debug line and a slower ramp,
+# never a setup failure.
+DEFAULT_GLM_BACKFILL = ""
+BACKFILL_PATH = "/glm/flashes"
+BACKFILL_TIMEOUT = 20
 DEFAULT_PHENOMENON_SENSORS = True
 
 # Ring counts published as their own sensors, in miles. Rings at or beyond the

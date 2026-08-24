@@ -26,6 +26,7 @@ from .const import (
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
     CONF_GLM_ALERT,
+    CONF_GLM_BACKFILL,
     CONF_GLM_PERSONS,
     CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
@@ -35,6 +36,7 @@ from .const import (
     DEFAULT_ENABLE_ALERTS,
     DEFAULT_ENABLE_GLM,
     DEFAULT_GLM_ALERT,
+    DEFAULT_GLM_BACKFILL,
     DEFAULT_GLM_PERSONS,
     DEFAULT_GLM_RADIUS,
     DEFAULT_GLM_WINDOW,
@@ -243,6 +245,9 @@ class WxAlertsOptionsFlow(OptionsFlow):
                         ),
                         CONF_GLM_WINDOW: user_input[CONF_GLM_WINDOW],
                         CONF_GLM_PERSONS: user_input[CONF_GLM_PERSONS],
+                        CONF_GLM_BACKFILL: user_input.get(
+                            CONF_GLM_BACKFILL, DEFAULT_GLM_BACKFILL
+                        ).strip(),
                         CONF_PHENOMENON_SENSORS: user_input[CONF_PHENOMENON_SENSORS],
                     },
                 )
@@ -289,6 +294,12 @@ class WxAlertsOptionsFlow(OptionsFlow):
                     CONF_GLM_PERSONS,
                     default=current.get(CONF_GLM_PERSONS, DEFAULT_GLM_PERSONS),
                 ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_GLM_BACKFILL,
+                    default=current.get(CONF_GLM_BACKFILL, DEFAULT_GLM_BACKFILL),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
+                ),
                 vol.Required(
                     CONF_PHENOMENON_SENSORS,
                     default=current.get(

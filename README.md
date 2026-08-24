@@ -60,12 +60,30 @@ So you give it a radius, and it works out which cells that radius reaches,
 subscribes to all of them, and measures every flash's true great-circle
 distance. Cell membership is never the answer to "how close is it".
 
+#### Starting mid-storm
+
+The flash feed is a stream of events with nothing retained, so an integration
+that starts during a storm sees an empty window and reports a calm sky while it
+fills. On the first connection it asks the feed's history endpoint for the
+window it is about to report on, so it starts populated instead of ramping from
+zero.
+
+That endpoint is not routed on every deployment. If it cannot be reached the
+integration logs one line and fills from live flashes instead — a slower ramp,
+never a setup failure. Set **Lightning history URL** if yours lives somewhere
+other than the feed host.
+
 #### When the feed goes quiet
 
 Lightning entities report `unavailable`, never a calm-looking zero, when the
-feed goes stale — the integration watches the ingest's own heartbeat. A
+feed goes stale — the integration watches the ingest's own retained heartbeat. A
 confident zero during an outage looks exactly like a quiet sky, and the outage
 is most likely when the storm is overhead.
+
+The heartbeat carries the time it was written, and that matters more than it
+sounds: a retained message says nothing about its own age, so a frozen "last
+granule 18 s ago" from an ingest that died an hour ago would otherwise read as
+perfectly healthy.
 
 Trigger automations `from: "off"` rather than on any change to `on`, so a feed
 *recovering* (`unavailable` → `on`) does not read as news about the sky.

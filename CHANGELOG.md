@@ -34,6 +34,11 @@ instead of being chosen by hand.
   a GPS fix gets their own lightning device, re-measured as they move. Coverage
   follows them without dropping the broker session; someone with no fix is
   skipped rather than reported at a stale position.
+- **The window starts full, not empty.** Nothing on the flash tree is retained,
+  so starting during a storm meant reporting calm and ramping up over the whole
+  window. The integration now asks the feed's history endpoint once on connect.
+  Where that endpoint is not routed it logs one line and fills from live
+  flashes — a slower ramp, never a setup failure.
 - Trimming coverage to fit the broker's subscription cap is logged with what
   was dropped, because a dropped cell is a direction the sensor cannot see.
 

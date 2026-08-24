@@ -8,8 +8,11 @@ by an entity assertion.
 from __future__ import annotations
 
 import asyncio
+import time
+from datetime import datetime, timezone
 from unittest.mock import patch
 
+import aiohttp
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
 
@@ -17,6 +20,7 @@ from custom_components.wxalerts.const import (
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
     CONF_GLM_ALERT,
+    CONF_GLM_BACKFILL,
     CONF_GLM_PERSONS,
     CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
@@ -920,3 +924,176 @@ async def test_a_person_who_moves_is_measured_from_their_new_position(hass):
     await hass.async_block_till_done()
 
     assert coordinator.metrics_for("person.clint").nearby is False
+
+
+# ---------------------------------------------------------------------------
+# Backfill — the window must not start empty during a storm
+# ---------------------------------------------------------------------------
+
+
+class FakeResponse:
+    def __init__(self, status=200, body=None, raises=None):
+        self.status = status
+        self._body = body or {}
+        self._raises = raises
+
+    async def json(self):
+        if self._raises:
+            raise self._raises
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class FakeSession:
+    def __init__(self, response):
+        self._response = response
+        self.calls = []
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append((url, params))
+        if isinstance(self._response, Exception):
+            raise self._response
+        return self._response
+
+
+def with_session(coordinator, response):
+    session = FakeSession(response)
+    return session, patch(
+        "custom_components.wxalerts.coordinator.async_get_clientsession",
+        return_value=session,
+    )
+
+
+async def test_backfill_populates_the_window_on_connect(hass, no_backfill):
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    body = {"count": 2, "flashes": fresh_burst()["flashes"]}
+    session, patched = with_session(coordinator, FakeResponse(body=body))
+
+    with patched:
+        await no_backfill.original(coordinator)
+
+    assert coordinator.metrics_for("zone.home").total == 2
+    url, params = session.calls[0]
+    # The request asks for exactly the window the sensors report over.
+    assert params["radius_mi"] == "30.0"
+    assert params["minutes"] == str(coordinator.glm_window_minutes)
+
+
+async def test_backfill_asks_for_every_target(hass, no_backfill):
+    set_person(hass, "person.clint", 30.65, -87.05, "Clint")
+    coordinator = make_coordinator(
+        hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_PERSONS: True}
+    )
+    session, patched = with_session(coordinator, FakeResponse(body={"flashes": []}))
+
+    with patched:
+        await no_backfill.original(coordinator)
+
+    assert len(session.calls) == 2
+
+
+async def test_an_unreachable_backfill_is_not_an_error(hass, no_backfill, caplog):
+    """The endpoint is not routed on every deployment. Failing to reach it
+    costs a slower ramp, not a broken integration."""
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    _session, patched = with_session(coordinator, aiohttp.ClientError("no route"))
+
+    with patched:
+        await no_backfill.original(coordinator)
+
+    assert coordinator.glm_window_flashes == 0
+    assert "ERROR" not in caplog.text
+
+
+async def test_a_503_backfill_does_not_invent_a_calm_sky(hass, no_backfill):
+    """503 means the history sink is down, which is not the same as no
+    lightning — it must not be recorded as an empty window."""
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    _session, patched = with_session(coordinator, FakeResponse(status=503))
+
+    with patched:
+        await no_backfill.original(coordinator)
+
+    assert coordinator.glm_window_flashes == 0
+
+
+async def test_backfill_runs_once_not_on_every_reconnect(hass, no_backfill):
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    for _ in range(3):
+        coordinator._handle_connection(True)
+        coordinator._handle_connection(False)
+    await hass.async_block_till_done()
+
+    assert no_backfill.await_count == 1
+
+
+async def test_the_backfill_url_defaults_to_the_feed_host(hass):
+    coordinator = make_coordinator(hass)
+    assert coordinator._backfill_endpoint().startswith("https://")
+    assert coordinator._backfill_endpoint().endswith("/glm/flashes")
+
+
+async def test_a_configured_backfill_url_wins(hass):
+    coordinator = make_coordinator(
+        hass, **{CONF_GLM_BACKFILL: "http://192.0.2.10:8091/flashes"}
+    )
+    assert coordinator._backfill_endpoint() == "http://192.0.2.10:8091/flashes"
+
+
+# ---------------------------------------------------------------------------
+# A retained heartbeat carries no hint of its own age
+# ---------------------------------------------------------------------------
+
+
+async def test_a_frozen_heartbeat_from_a_dead_ingest_is_not_trusted(hass):
+    """The killer case: a retained message saying "last granule 18 s ago",
+    written by a service that died an hour ago. Read naively it says the feed
+    is perfectly healthy."""
+    coordinator = make_coordinator(hass)
+    coordinator._handle_connection(True)
+
+    written = datetime.fromtimestamp(time.time() - 3600, tz=timezone.utc)
+    coordinator._handle_glm_status(
+        encode(
+            {
+                "at": written.isoformat(),
+                "healthy": True,
+                "last_granule_age_seconds": 18,
+            }
+        )
+    )
+
+    assert coordinator.glm_available is False
+
+
+async def test_a_current_heartbeat_is_trusted(hass):
+    coordinator = make_coordinator(hass)
+    coordinator._handle_connection(True)
+    coordinator._handle_glm_status(
+        encode(
+            {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "healthy": True,
+                "last_granule_age_seconds": 18,
+            }
+        )
+    )
+
+    assert coordinator.glm_available is True
+    assert coordinator.glm_feed_age == pytest.approx(18, abs=5)
+
+
+async def test_the_will_marks_the_feed_dead(hass):
+    """The broker publishes this on our behalf when the ingest drops off."""
+    coordinator = make_coordinator(hass)
+    coordinator._handle_connection(True)
+    coordinator._handle_glm_status(
+        encode({"healthy": False, "reason": "publisher disconnected"})
+    )
+
+    assert coordinator.glm_available is False

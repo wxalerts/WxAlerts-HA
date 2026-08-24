@@ -33,7 +33,8 @@
           "glm_alert_mi": "Seek-shelter distance (miles) — turns on the safety sensor",
           "glm_window_minutes": "Lightning window (minutes)",
           "glm_track_persons": "Also track people (every person with a GPS fix gets their own lightning device)",
-          "phenomenon_sensors": "Per-phenomenon binary sensors (tornado, severe thunderstorm, …)"
+          "phenomenon_sensors": "Per-phenomenon binary sensors (tornado, severe thunderstorm, …)",
+          "glm_backfill_url": "Lightning history URL (optional) — fills the window on startup instead of ramping from zero; leave blank to derive it from the feed host"
         }
       }
     },

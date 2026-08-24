@@ -21,18 +21,23 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import aiohttp
 import aiomqtt
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.instance_id import async_get as async_get_instance_id
 from homeassistant.util.ssl import get_default_context
 
 from .const import (
+    BACKFILL_PATH,
+    BACKFILL_TIMEOUT,
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
     CONF_GLM_ALERT,
+    CONF_GLM_BACKFILL,
     CONF_GLM_PERSONS,
     CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
@@ -40,6 +45,7 @@ from .const import (
     DEFAULT_ENABLE_ALERTS,
     DEFAULT_ENABLE_GLM,
     DEFAULT_GLM_ALERT,
+    DEFAULT_GLM_BACKFILL,
     DEFAULT_GLM_PERSONS,
     DEFAULT_GLM_RADIUS,
     DEFAULT_GLM_WINDOW,
@@ -254,6 +260,9 @@ class WxAlertsCoordinator:
         self.glm_track_persons: bool = bool(
             options.get(CONF_GLM_PERSONS, DEFAULT_GLM_PERSONS)
         )
+        self.glm_backfill_url: str = (
+            options.get(CONF_GLM_BACKFILL, DEFAULT_GLM_BACKFILL) or ""
+        ).strip()
         self.glm_rings: tuple[int, ...] = tuple(
             ring for ring in RING_MILES if ring <= self.glm_radius_mi
         )
@@ -286,6 +295,9 @@ class WxAlertsCoordinator:
         # explicit False is stronger evidence than silence and must not fall
         # through to "assume fine".
         self._glm_feed_ok: bool | None = None
+        # Backfill runs once per connection, not once per reconnect storm.
+        self._backfill_done: bool = False
+        self._backfill_warned: bool = False
         self._unsub_persons: Callable[[], None] | None = None
         # Platforms register here so a person who appears after setup gets
         # entities without a restart.
@@ -534,6 +546,9 @@ class WxAlertsCoordinator:
             # A fresh subscription replays the retained set; hold events off
             # until it has landed.
             self._priming_until = time.monotonic() + _PRIMING_SECONDS
+            if self.enable_glm and not self._backfill_done:
+                self._backfill_done = True
+                self.hass.async_create_task(self._async_backfill())
         async_dispatcher_send(
             self.hass, f"{SIGNAL_CONNECTION}_{self.entry.entry_id}", connected
         )
@@ -601,6 +616,104 @@ class WxAlertsCoordinator:
             self.hass, f"{SIGNAL_ALERTS_UPDATED}_{self.entry.entry_id}_{same}"
         )
 
+    def _backfill_endpoint(self) -> str:
+        """Where to ask for history.
+
+        Derived from the broker host when unset, so a deployment that routes
+        the ingest alongside the broker needs no configuration at all — and one
+        that does not simply gets a slower ramp.
+        """
+        if self.glm_backfill_url:
+            return self.glm_backfill_url
+        return f"https://{DEFAULT_HOST}{BACKFILL_PATH}"
+
+    async def _async_backfill(self) -> None:
+        """Fill the window from history, once, on the first connection.
+
+        The flash tree is unretained, so a client connecting mid-storm sees an
+        empty window and reports a calm sky while ramping up over the whole
+        window length. That is the worst possible moment to under-report.
+
+        Entirely best-effort: the endpoint is not routed on every deployment,
+        and failing to reach it costs a slower ramp, not a broken integration.
+        """
+        endpoint = self._backfill_endpoint()
+        session = async_get_clientsession(self.hass)
+        recovered = 0
+
+        for target in list(self._targets.values()):
+            params = {
+                "lat": f"{target.latitude:.5f}",
+                "lon": f"{target.longitude:.5f}",
+                "radius_mi": str(self.glm_radius_mi),
+                "minutes": str(self.glm_window_minutes),
+            }
+            try:
+                async with session.get(
+                    endpoint, params=params, timeout=aiohttp.ClientTimeout(
+                        total=BACKFILL_TIMEOUT
+                    )
+                ) as response:
+                    if response.status != 200:
+                        self._warn_backfill(
+                            "returned HTTP %s", endpoint, response.status
+                        )
+                        return
+                    body = await response.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+                self._warn_backfill("is unreachable (%s)", endpoint, err)
+                return
+
+            flashes = self._parse_flashes(body.get("flashes") or [], time.time())
+            if flashes:
+                self._store.add(flashes)
+                recovered += len(flashes)
+
+        if recovered:
+            _LOGGER.debug(
+                "Backfilled %d flash(es) from %s; the window starts populated "
+                "instead of ramping from zero",
+                recovered,
+                endpoint,
+            )
+            self._recompute_all()
+
+    def _warn_backfill(self, reason: str, endpoint: str, detail: Any) -> None:
+        """Say it once. A backfill failure is a slower ramp, not an outage, and
+        repeating it every reconnect would bury the things that matter."""
+        if self._backfill_warned:
+            return
+        self._backfill_warned = True
+        _LOGGER.info(
+            "Lightning history at %s " + reason + "; the window will fill from "
+            "live flashes instead. This is not an error — it only means the "
+            "first few minutes after a restart under-report.",
+            endpoint,
+            detail,
+        )
+
+    def _parse_flashes(self, raw: list[dict[str, Any]], now: float) -> list[Flash]:
+        """Flash objects from the feed's wire shape.
+
+        Shared by the live burst path and the backfill, which is the point of
+        the endpoint returning the same shape as an MQTT message.
+        """
+        flashes: list[Flash] = []
+        for flash in raw:
+            lat = flash.get("lat")
+            lon = flash.get("lon")
+            if lat is None or lon is None:
+                continue
+            flashes.append(
+                Flash(
+                    when=parse_flash_time(flash.get("t"), now),
+                    latitude=float(lat),
+                    longitude=float(lon),
+                    energy_j=flash.get("energy_j"),
+                )
+            )
+        return flashes
+
     def _handle_glm_status(self, payload: bytes) -> None:
         """Retained heartbeat from the lightning ingest.
 
@@ -626,10 +739,18 @@ class WxAlertsCoordinator:
         self._glm_feed_ok = healthy is not False
         if healthy is False:
             self._glm_heartbeat = None
-        elif isinstance(age, (int, float)) and age >= 0:
-            self._glm_heartbeat = now - float(age)
-        else:
-            self._glm_heartbeat = now
+            self._recompute_all()
+            return
+
+        # The heartbeat is retained, so it carries no hint of its own age: a
+        # frozen "last granule 18 s ago" from an ingest that died an hour ago
+        # would read as perfectly healthy. `at` is what makes that detectable —
+        # real feed age is how old the message is plus how stale it said the
+        # feed was when it was written.
+        written_at = parse_flash_time(status.get("at"), now)
+        message_age = max(0.0, now - written_at)
+        granule_age = float(age) if isinstance(age, (int, float)) and age >= 0 else 0.0
+        self._glm_heartbeat = now - (message_age + granule_age)
         self._recompute_all()
 
     def _handle_glm(self, leaf_geohash: str, payload: bytes) -> None:
@@ -642,21 +763,7 @@ class WxAlertsCoordinator:
 
         now = time.time()
         self._glm_last_message = now
-        flashes = burst.get("flashes") or []
-        parsed = []
-        for flash in flashes:
-            lat = flash.get("lat")
-            lon = flash.get("lon")
-            if lat is None or lon is None:
-                continue
-            parsed.append(
-                Flash(
-                    when=parse_flash_time(flash.get("t"), now),
-                    latitude=float(lat),
-                    longitude=float(lon),
-                    energy_j=flash.get("energy_j"),
-                )
-            )
+        parsed = self._parse_flashes(burst.get("flashes") or [], now)
         if not parsed:
             return
 

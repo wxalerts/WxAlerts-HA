@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.wxalerts.coordinator import WxAlertsCoordinator
 from custom_components.wxalerts.const import (
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
@@ -26,6 +27,24 @@ from custom_components.wxalerts.const import (
 from .const import LOCATION_AUTAUGA, LOCATION_SANTA_ROSA
 
 pytest_plugins = "pytest_homeassistant_custom_component"
+
+
+@pytest.fixture(autouse=True)
+def no_backfill():
+    """Stub the history fetch out of every test by default.
+
+    It fires on connect and is the one thing in the integration that reaches
+    for a socket the FeedClient patch does not cover. Yields the mock, so a
+    test that cares can assert it was called; the tests that exercise the real
+    request patch the HTTP session instead.
+    """
+    original = WxAlertsCoordinator._async_backfill
+    with patch.object(
+        WxAlertsCoordinator, "_async_backfill", new_callable=AsyncMock
+    ) as backfill:
+        # The real coroutine, for the tests that exercise the request itself.
+        backfill.original = original
+        yield backfill
 
 
 @pytest.fixture
