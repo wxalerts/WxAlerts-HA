@@ -70,8 +70,12 @@ zero.
 
 That endpoint is not routed on every deployment. If it cannot be reached the
 integration logs one line and fills from live flashes instead — a slower ramp,
-never a setup failure. Set **Lightning history URL** if yours lives somewhere
-other than the feed host.
+never a setup failure.
+
+Set **Lightning history URL** if yours lives somewhere other than the feed host.
+Pointing it straight at the ingest on your own network is the simplest answer
+and needs no public route at all — for example
+`http://10.0.0.5:8091/flashes`.
 
 #### When the feed goes quiet
 
