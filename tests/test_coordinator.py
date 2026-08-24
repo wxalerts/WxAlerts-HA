@@ -997,6 +997,46 @@ async def test_backfill_asks_for_every_target(hass, no_backfill):
     assert len(session.calls) == 2
 
 
+async def test_backfill_does_not_count_the_same_flash_once_per_target(
+    hass, no_backfill
+):
+    """Found live, not in a fixture: three targets in one town each fetch the
+    same history into one shared window, so every count came back exactly 3x.
+
+    A single-target test cannot see this, which is why it shipped."""
+    set_person(hass, "person.clint", 30.6440, -87.0550, "Clint")
+    set_person(hass, "person.sierra", 30.6450, -87.0560, "Sierra")
+    coordinator = make_coordinator(
+        hass, **{CONF_GLM_RADIUS: 30, CONF_GLM_PERSONS: True}
+    )
+    assert len(coordinator.targets) == 3
+
+    body = {"flashes": fresh_burst()["flashes"]}
+    _session, patched = with_session(coordinator, FakeResponse(body=body))
+    with patched:
+        await no_backfill.original(coordinator)
+
+    assert coordinator.glm_window_flashes == 2
+    assert coordinator.metrics_for("zone.home").total == 2
+
+
+async def test_backfill_does_not_double_count_a_live_burst(hass, no_backfill):
+    """A burst can land while the backfill request is in flight; it is the same
+    flash and must not be counted twice."""
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    burst = fresh_burst()
+    await coordinator._handle_message(TOPIC_GLM_LEAF, encode(burst))
+    assert coordinator.glm_window_flashes == 2
+
+    _session, patched = with_session(
+        coordinator, FakeResponse(body={"flashes": burst["flashes"]})
+    )
+    with patched:
+        await no_backfill.original(coordinator)
+
+    assert coordinator.glm_window_flashes == 2
+
+
 async def test_an_unreachable_backfill_is_not_an_error(hass, no_backfill, caplog):
     """The endpoint is not routed on every deployment. Failing to reach it
     costs a slower ramp, not a broken integration."""

@@ -639,7 +639,12 @@ class WxAlertsCoordinator:
         """
         endpoint = self._backfill_endpoint()
         session = async_get_clientsession(self.hass)
-        recovered = 0
+
+        # One request per target, but one shared window — and targets in the
+        # same town return overlapping history, so the union has to be taken by
+        # identity rather than concatenated. Adding each response straight to
+        # the store multiplied every count by the number of targets.
+        fetched: dict[tuple[float, float, float], Flash] = {}
 
         for target in list(self._targets.values()):
             params = {
@@ -664,16 +669,25 @@ class WxAlertsCoordinator:
                 self._warn_backfill("is unreachable (%s)", endpoint, err)
                 return
 
-            flashes = self._parse_flashes(body.get("flashes") or [], time.time())
-            if flashes:
-                self._store.add(flashes)
-                recovered += len(flashes)
+            for flash in self._parse_flashes(body.get("flashes") or [], time.time()):
+                fetched[(flash.when, flash.latitude, flash.longitude)] = flash
+
+        # Live bursts may have landed while this was in flight; they are the
+        # same flashes and must not be counted twice either.
+        already = {
+            (flash.when, flash.latitude, flash.longitude)
+            for flash in self._store.flashes()
+        }
+        recovered = [
+            flash for key, flash in fetched.items() if key not in already
+        ]
 
         if recovered:
+            self._store.add(recovered)
             _LOGGER.debug(
                 "Backfilled %d flash(es) from %s; the window starts populated "
                 "instead of ramping from zero",
-                recovered,
+                len(recovered),
                 endpoint,
             )
             self._recompute_all()
