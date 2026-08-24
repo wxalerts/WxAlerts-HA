@@ -1020,6 +1020,23 @@ async def test_backfill_does_not_count_the_same_flash_once_per_target(
     assert coordinator.metrics_for("zone.home").total == 2
 
 
+async def test_two_real_flashes_at_one_instant_are_both_kept(hass, no_backfill):
+    """Position is published rounded to ~11 m and GLM bins time coarsely, so a
+    busy core really can produce two flashes sharing both. Keying dedup on time
+    and place alone silently merges them and under-counts."""
+    coordinator = make_coordinator(hass, **{CONF_GLM_RADIUS: 30})
+    burst = fresh_burst()
+    twin = dict(burst["flashes"][0])
+    twin["energy_j"] = 9.99e-13  # same instant, same rounded position
+    body = {"flashes": [burst["flashes"][0], twin]}
+
+    _session, patched = with_session(coordinator, FakeResponse(body=body))
+    with patched:
+        await no_backfill.original(coordinator)
+
+    assert coordinator.glm_window_flashes == 2
+
+
 async def test_backfill_does_not_double_count_a_live_burst(hass, no_backfill):
     """A burst can land while the backfill request is in flight; it is the same
     flash and must not be counted twice."""

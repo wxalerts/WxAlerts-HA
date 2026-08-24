@@ -90,6 +90,17 @@ _BACKOFF_INITIAL = 2.0
 _BACKOFF_MAX = 300.0
 _BACKOFF_RESET_AFTER = 120.0  # connection considered stable after this
 
+
+def _flash_key(flash: "Flash") -> tuple[Any, ...]:
+    """Identity for de-duplicating a flash seen more than once.
+
+    Energy is part of the key, not decoration. Position is published rounded to
+    four decimals (~11 m) and GLM bins time coarsely enough that two distinct
+    flashes in the same cluster can share both — so keying on time and place
+    alone quietly merges real strikes and under-counts a busy core.
+    """
+    return (flash.when, flash.latitude, flash.longitude, flash.energy_j)
+
 # Subscribing replays every live hazard as a retained message. That burst is
 # current state, not news, and the feed's own guidance is not to notify on it
 # — otherwise every HA restart re-announces every warning in effect. Alerts
@@ -644,7 +655,7 @@ class WxAlertsCoordinator:
         # same town return overlapping history, so the union has to be taken by
         # identity rather than concatenated. Adding each response straight to
         # the store multiplied every count by the number of targets.
-        fetched: dict[tuple[float, float, float], Flash] = {}
+        fetched: dict[tuple[Any, ...], Flash] = {}
 
         for target in list(self._targets.values()):
             params = {
@@ -670,14 +681,11 @@ class WxAlertsCoordinator:
                 return
 
             for flash in self._parse_flashes(body.get("flashes") or [], time.time()):
-                fetched[(flash.when, flash.latitude, flash.longitude)] = flash
+                fetched[_flash_key(flash)] = flash
 
         # Live bursts may have landed while this was in flight; they are the
         # same flashes and must not be counted twice either.
-        already = {
-            (flash.when, flash.latitude, flash.longitude)
-            for flash in self._store.flashes()
-        }
+        already = {_flash_key(flash) for flash in self._store.flashes()}
         recovered = [
             flash for key, flash in fetched.items() if key not in already
         ]
