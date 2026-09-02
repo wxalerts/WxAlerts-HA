@@ -55,7 +55,10 @@ from .const import (
     DEFAULT_USERNAME,
     DEFAULT_WS_PATH,
     EVENT_ALERT,
+    EVENT_HAZARD,
     GLM_STALE_SECONDS,
+    HAZARD_BEGIN,
+    HAZARD_END,
     LOC_LAT,
     LOC_LON,
     LOC_NAME,
@@ -65,12 +68,14 @@ from .const import (
     RING_MILES,
     SEVERITY_NONE,
     SEVERITY_ORDER,
+    SIGNIFICANCE_ORDER,
     SIGNAL_ALERTS_UPDATED,
     SIGNAL_CONNECTION,
     SIGNAL_GLM_UPDATED,
     TOPIC_GLM_STATUS,
     TOPIC_SAME_FMT,
 )
+from .events import event_key_for, event_name_for
 from .geo import glm_topic_for_geohash, haversine_miles, plan_coverage
 from .lightning import (
     Flash,
@@ -108,6 +113,27 @@ def _flash_key(flash: "Flash") -> tuple[Any, ...]:
 # event. The cost is that a hazard issued during those seconds is silent on
 # the event bus; its binary_sensor still turns on.
 _PRIMING_SECONDS = 5.0
+
+
+def _alert_rank(alert: dict[str, Any]) -> tuple[int, int]:
+    """Sort key: most dangerous first.
+
+    Severity alone is not enough to order a list a person reads top-down. NWS
+    assigns it per product type, so a Tornado Watch and a Severe Thunderstorm
+    Warning are both "Severe" and their relative order would come down to
+    whichever arrived first. Significance breaks the tie the way a forecaster
+    would: a warning outranks a watch outranks an advisory.
+    """
+    severity = alert.get("severity") or ""
+    significance = alert.get("significance") or ""
+    return (
+        SEVERITY_ORDER.index(severity)
+        if severity in SEVERITY_ORDER
+        else len(SEVERITY_ORDER),
+        SIGNIFICANCE_ORDER.index(significance)
+        if significance in SIGNIFICANCE_ORDER
+        else len(SIGNIFICANCE_ORDER),
+    )
 
 
 @dataclass
@@ -287,6 +313,10 @@ class WxAlertsCoordinator:
         self._event_fired: set[str] = set()
         # Monotonic deadline for the retained-burst window; see _PRIMING_SECONDS.
         self._priming_until: float = 0.0
+        # Which event types are currently in effect per county. Transitions of
+        # this set — not of individual alerts — are what a "Tornado Warning
+        # begins" trigger means.
+        self._active_events: dict[str, set[str]] = {}
 
         # One shared window of flashes; every target measures its own distance
         # against it rather than keeping a private copy of the same storm.
@@ -626,6 +656,73 @@ class WxAlertsCoordinator:
         async_dispatcher_send(
             self.hass, f"{SIGNAL_ALERTS_UPDATED}_{self.entry.entry_id}_{same}"
         )
+        self._fire_hazard_transitions(same)
+
+    def _fire_hazard_transitions(self, same: str) -> None:
+        """Announce event types that just started or stopped being in effect.
+
+        Entities are written first, by the dispatcher call above, so an
+        automation woken by one of these events reads current entity state
+        rather than the state from before the hazard landed.
+
+        A begin during the retained-replay window is suppressed for the same
+        reason EVENT_ALERT suppresses one — every restart would otherwise
+        re-announce every hazard already in effect. Ends are never suppressed:
+        the set starts empty on a restart and grows, so a spurious end cannot
+        be produced by priming, and a real expiry landing in those five seconds
+        is worth delivering.
+        """
+        previous = self._active_events.get(same, set())
+        current = {
+            event_key_for(alert) for alert in self.alerts_for(same)
+        }
+        if current == previous:
+            return
+        self._active_events[same] = current
+
+        priming = time.monotonic() < self._priming_until
+        location = self._location_for(same)
+        for key in current - previous:
+            if priming:
+                _LOGGER.debug("Retained hazard %s on %s; not firing", key, same)
+                continue
+            self._fire_hazard(same, location, key, HAZARD_BEGIN)
+        for key in previous - current:
+            self._fire_hazard(same, location, key, HAZARD_END)
+
+    def _fire_hazard(
+        self, same: str, location: dict[str, Any] | None, key: str, action: str
+    ) -> None:
+        # On an end there is no alert left to describe, so the payload carries
+        # what the transition is about and nothing that only a live product has.
+        alert = next(
+            (
+                alert
+                for alert in self.alerts_for(same)
+                if event_key_for(alert) == key
+            ),
+            None,
+        )
+        self.hass.bus.async_fire(
+            EVENT_HAZARD,
+            {
+                "same": same,
+                "location": (location or {}).get(LOC_NAME),
+                "zone": (location or {}).get(LOC_ZONE_ENTITY),
+                "event_type": key,
+                "event": event_name_for(alert) if alert else key,
+                "action": action,
+                "severity": alert.get("severity") if alert else None,
+                "headline": alert.get("headline") if alert else None,
+                "ends": alert.get("ends") if alert else None,
+                "vtec": alert.get("vtec") if alert else None,
+            },
+        )
+
+    def _location_for(self, same: str) -> dict[str, Any] | None:
+        return next(
+            (loc for loc in self.locations if loc.get(LOC_SAME) == same), None
+        )
 
     def _backfill_endpoint(self) -> str:
         """Where to ask for history.
@@ -835,15 +932,7 @@ class WxAlertsCoordinator:
             if alert.get("status", "active") == "active"
         ]
 
-        def severity_rank(alert: dict[str, Any]) -> int:
-            severity = alert.get("severity") or ""
-            return (
-                SEVERITY_ORDER.index(severity)
-                if severity in SEVERITY_ORDER
-                else len(SEVERITY_ORDER)
-            )
-
-        alerts.sort(key=severity_rank)
+        alerts.sort(key=_alert_rank)
         return alerts
 
     def alert_topics_for(self, same: str) -> dict[str, dict[str, Any]]:
@@ -861,9 +950,23 @@ class WxAlertsCoordinator:
         severity = alerts[0].get("severity")
         return severity if severity in SEVERITY_ORDER else SEVERITY_NONE
 
-    def has_phenomenon(self, same: str, phenomenon: str) -> bool:
+    def active_event_keys(self, same: str) -> set[str]:
+        """Catalogue keys in effect for a county right now."""
+        return {event_key_for(alert) for alert in self.alerts_for(same)}
+
+    def alerts_for_event(self, same: str, key: str) -> list[dict[str, Any]]:
+        """The live products behind one event type, most urgent first.
+
+        Several is normal and not a duplicate: two Flood Warnings on different
+        forecast points are two products describing one hazard type.
+        """
+        return [
+            alert for alert in self.alerts_for(same) if event_key_for(alert) == key
+        ]
+
+    def has_event(self, same: str, key: str) -> bool:
         return any(
-            alert.get("phenomena") == phenomenon for alert in self.alerts_for(same)
+            event_key_for(alert) == key for alert in self.alerts_for(same)
         )
 
     # ------------------------------------------------------------------

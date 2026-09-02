@@ -25,8 +25,8 @@ from custom_components.wxalerts.const import (
     CONF_ENABLE_GLM,
     CONF_GLM_ALERT,
     CONF_GLM_RADIUS,
+    CONF_EVENT_SENSORS,
     CONF_LOCATIONS,
-    CONF_PHENOMENON_SENSORS,
     CONF_ZONES,
     DOMAIN,
 )
@@ -47,10 +47,14 @@ from .const import (
 )
 
 ACTIVE_ALERT = "binary_sensor.wxalerts_home_active_alert"
-TORNADO_SENSOR = "binary_sensor.wxalerts_home_tornado_alert"
-SEVERE_SENSOR = "binary_sensor.wxalerts_home_severe_thunderstorm_alert"
+# One entity per NWS event type, not per phenomenon: the warning and the watch
+# are separate sensors because they mean separate things.
+TORNADO_SENSOR = "binary_sensor.wxalerts_home_tornado_warning"
+TORNADO_WATCH = "binary_sensor.wxalerts_home_tornado_watch"
+SEVERE_SENSOR = "binary_sensor.wxalerts_home_severe_thunderstorm_warning"
 SEVERITY = "sensor.wxalerts_home_highest_severity"
 COUNT = "sensor.wxalerts_home_active_alerts"
+TOP = "sensor.wxalerts_home_top_alert"
 # The lightning device is named "Lightning — Home", so Home Assistant builds
 # these ids from the device and entity names together. They match what a
 # dashboard built against the standalone proximity service already points at,
@@ -82,21 +86,92 @@ async def test_entities_are_created_for_each_county(hass, setup_integration):
     assert hass.states.get("sensor.wxalerts_cabin_highest_severity") is not None
 
 
-async def test_dangerous_phenomenon_sensors_are_enabled_by_default(
+async def test_life_threatening_warnings_are_the_default_selection(
     hass, setup_integration
 ):
-    """Tornado, severe thunderstorm and flash flood are on; the slower
-    hazards exist but stay out of the way until asked for."""
-    registry = er.async_get(hass)
-
+    """A fresh entry gets the hazards that can kill someone asleep, and
+    nothing else — every other type is a device trigger away, and an entity
+    only when asked for."""
     for entity_id in (TORNADO_SENSOR, SEVERE_SENSOR):
-        assert registry.async_get(entity_id).disabled is False
-    assert hass.states.get(TORNADO_SENSOR) is not None
+        assert hass.states.get(entity_id) is not None, entity_id
 
-    winter = registry.async_get("binary_sensor.wxalerts_home_winter_storm_alert")
-    assert winter is not None
-    assert winter.disabled is True
-    assert hass.states.get("binary_sensor.wxalerts_home_winter_storm_alert") is None
+    # A watch is not a warning: it is not created unless selected, which is
+    # exactly the distinction the phenomenon buckets could not make.
+    assert hass.states.get(TORNADO_WATCH) is None
+    assert hass.states.get("binary_sensor.wxalerts_home_heat_advisory") is None
+
+
+async def test_selecting_event_types_creates_exactly_those_sensors(
+    hass, mock_feed_client, enable_custom_integrations
+):
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=DOMAIN,
+        data={
+            CONF_ZONES: ["zone.home"],
+            CONF_LOCATIONS: [LOCATION_SANTA_ROSA],
+            CONF_ENABLE_ALERTS: True,
+            CONF_ENABLE_GLM: False,
+        },
+        options={CONF_EVENT_SENSORS: ["tornado_watch", "blizzard_warning"]},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(TORNADO_WATCH) is not None
+    assert hass.states.get("binary_sensor.wxalerts_home_blizzard_warning") is not None
+    # Not selected, so not created — the default set does not leak back in.
+    assert hass.states.get(TORNADO_SENSOR) is None
+
+
+async def test_a_watch_does_not_light_the_warning_sensor(
+    hass, mock_feed_client, enable_custom_integrations
+):
+    """The whole reason for the rework. Under the phenomenon buckets both of
+    these turned on one "Tornado" sensor, so a take-cover automation fired on
+    a watch."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=DOMAIN,
+        data={
+            CONF_ZONES: ["zone.home"],
+            CONF_LOCATIONS: [LOCATION_SANTA_ROSA],
+            CONF_ENABLE_ALERTS: True,
+            CONF_ENABLE_GLM: False,
+        },
+        options={CONF_EVENT_SENSORS: ["tornado_warning", "tornado_watch"]},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data
+    coordinator._handle_connection(True)
+    await hass.async_block_till_done()
+
+    watch = {
+        **TORNADO_ALERT,
+        "vtec": "KMOB.TO.A.0099.2026",
+        "significance": "A",
+        "event": "Tornado Watch",
+        "severity": "Severe",
+    }
+    await feed(hass, coordinator, f"{TOPIC_TORNADO}9", encode(watch))
+
+    assert hass.states.get(TORNADO_WATCH).state == STATE_ON
+    assert hass.states.get(TORNADO_SENSOR).state == STATE_OFF
+
+    await feed(hass, coordinator, TOPIC_TORNADO, encode(TORNADO_ALERT))
+
+    assert hass.states.get(TORNADO_WATCH).state == STATE_ON
+    assert hass.states.get(TORNADO_SENSOR).state == STATE_ON
+    # Severity ties at "Severe" between a watch and many warnings, so the top
+    # sensor has to break the tie on significance rather than arrival order.
+    assert hass.states.get(TOP).state == "Tornado Warning"
 
 
 async def test_entities_are_unavailable_until_the_feed_connects(
@@ -137,6 +212,7 @@ async def test_quiet_county_reads_as_clear(hass, setup_integration):
     assert hass.states.get(ACTIVE_ALERT).state == STATE_OFF
     assert hass.states.get(SEVERITY).state == "None"
     assert hass.states.get(COUNT).state == "0"
+    assert hass.states.get(TOP).state == "None"
     assert hass.states.get(TORNADO_SENSOR).state == STATE_OFF
 
 
@@ -148,6 +224,7 @@ async def test_a_tornado_warning_lights_everything_up(hass, setup_integration):
     assert hass.states.get(COUNT).state == "1"
     assert hass.states.get(TORNADO_SENSOR).state == STATE_ON
     assert hass.states.get(SEVERE_SENSOR).state == STATE_OFF
+    assert hass.states.get(TOP).state == "Tornado Warning"
 
 
 async def test_the_count_sensor_carries_the_alert_list(hass, setup_integration):
@@ -165,6 +242,9 @@ async def test_the_count_sensor_carries_the_alert_list(hass, setup_integration):
     assert alert["instruction"] == TORNADO_ALERT["instruction"]
     assert alert["ends"] == "2026-08-11T20:45:00+00:00"
     assert alert["geometry_source"] == "polygon"
+    assert alert["event_type"] == "tornado_warning"
+    assert attributes["events"] == ["Tornado Warning"]
+    assert attributes["event_types"] == ["tornado_warning"]
 
 
 async def test_two_hazards_count_and_rank(hass, setup_integration):
@@ -560,7 +640,7 @@ async def test_alerts_only_setup_creates_no_lightning_sensor(
     assert hass.states.get(NEAREST) is None
 
 
-async def test_phenomenon_sensors_can_be_turned_off(
+async def test_selecting_nothing_creates_no_event_sensors(
     hass, mock_feed_client, enable_custom_integrations
 ):
     from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -574,7 +654,7 @@ async def test_phenomenon_sensors_can_be_turned_off(
             CONF_ENABLE_ALERTS: True,
             CONF_ENABLE_GLM: False,
         },
-        options={CONF_PHENOMENON_SENSORS: False},
+        options={CONF_EVENT_SENSORS: []},
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -642,3 +722,72 @@ async def test_reload_restores_the_entities(
     await hass.async_block_till_done()
 
     assert hass.states.get(ACTIVE_ALERT).state == STATE_OFF
+
+
+# ---------------------------------------------------------------------------
+# Upgrading from the phenomenon buckets
+# ---------------------------------------------------------------------------
+
+
+async def test_an_upgraded_entry_gets_the_default_selection(
+    hass, mock_feed_client, enable_custom_integrations
+):
+    """A 0.3.x entry has no selection at all, only the boolean that switched
+    the buckets on. It has to come out of the upgrade with working sensors."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=DOMAIN,
+        data={
+            CONF_ZONES: ["zone.home"],
+            CONF_LOCATIONS: [LOCATION_SANTA_ROSA],
+            CONF_ENABLE_ALERTS: True,
+            CONF_ENABLE_GLM: False,
+        },
+        options={"phenomenon_sensors": True},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(TORNADO_SENSOR) is not None
+    assert hass.states.get(SEVERE_SENSOR) is not None
+
+
+async def test_the_old_bucket_entities_are_removed_on_upgrade(
+    hass, mock_feed_client, enable_custom_integrations
+):
+    """Nothing recreates them, so left in the registry they sit there as
+    unavailable forever — and an automation still pointed at one looks fine
+    while never firing again. Removing them makes the break visible now.
+    """
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=DOMAIN,
+        data={
+            CONF_ZONES: ["zone.home"],
+            CONF_LOCATIONS: [LOCATION_SANTA_ROSA],
+            CONF_ENABLE_ALERTS: True,
+            CONF_ENABLE_GLM: False,
+        },
+    )
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    legacy = registry.async_get_or_create(
+        "binary_sensor",
+        DOMAIN,
+        f"{entry.entry_id}_012113_phen_to",
+        config_entry=entry,
+        suggested_object_id="wxalerts_home_tornado_alert",
+    )
+    # Renamed by the user, so matching has to be on the unique_id.
+    registry.async_update_entity(legacy.entity_id, new_entity_id="binary_sensor.twister")
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert registry.async_get("binary_sensor.twister") is None
+    assert hass.states.get(TORNADO_SENSOR) is not None

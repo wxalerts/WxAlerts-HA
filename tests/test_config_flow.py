@@ -20,7 +20,7 @@ from custom_components.wxalerts.const import (
     CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
     CONF_LOCATIONS,
-    CONF_PHENOMENON_SENSORS,
+    CONF_EVENT_SENSORS,
     CONF_ZONES,
     DOMAIN,
     LOC_COUNTY,
@@ -339,7 +339,7 @@ async def test_options_flow_re_resolves_zones(
             CONF_GLM_ALERT: 5,
             CONF_GLM_PERSONS: False,
             CONF_GLM_WINDOW: 30,
-            CONF_PHENOMENON_SENSORS: False,
+            CONF_EVENT_SENSORS: [],
         },
     )
     await hass.async_block_till_done()
@@ -382,7 +382,7 @@ async def test_options_flow_rejects_a_selection_with_no_usable_zone(
             CONF_GLM_ALERT: 10,
             CONF_GLM_PERSONS: False,
             CONF_GLM_WINDOW: 15,
-            CONF_PHENOMENON_SENSORS: True,
+            CONF_EVENT_SENSORS: ["tornado_warning"],
         },
     )
 
@@ -422,7 +422,7 @@ async def test_changing_options_reloads_the_entry(
             CONF_GLM_ALERT: 10,
             CONF_GLM_PERSONS: False,
             CONF_GLM_WINDOW: 45,
-            CONF_PHENOMENON_SENSORS: True,
+            CONF_EVENT_SENSORS: ["tornado_warning"],
         },
     )
     await hass.async_block_till_done()

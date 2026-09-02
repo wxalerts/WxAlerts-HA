@@ -27,6 +27,9 @@ from custom_components.wxalerts.const import (
     CONF_LOCATIONS,
     DOMAIN,
     EVENT_ALERT,
+    EVENT_HAZARD,
+    HAZARD_BEGIN,
+    HAZARD_END,
     MAX_SUBSCRIPTIONS,
     SEVERITY_NONE,
     TOPIC_GLM_STATUS,
@@ -470,20 +473,24 @@ async def test_unknown_severity_sorts_last_and_reports_none(hass):
     assert coordinator.highest_severity(SAME_SANTA_ROSA) == SEVERITY_NONE
 
 
-async def test_has_phenomenon(hass):
+async def test_has_event(hass):
     coordinator = make_coordinator(hass)
     await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
 
-    assert coordinator.has_phenomenon(SAME_SANTA_ROSA, "TO") is True
-    assert coordinator.has_phenomenon(SAME_SANTA_ROSA, "SV") is False
+    assert coordinator.has_event(SAME_SANTA_ROSA, "tornado_warning") is True
+    # The same phenomenon at a different significance is a different hazard.
+    assert coordinator.has_event(SAME_SANTA_ROSA, "tornado_watch") is False
+    assert coordinator.has_event(SAME_SANTA_ROSA, "severe_thunderstorm_warning") is False
+    assert coordinator.active_event_keys(SAME_SANTA_ROSA) == {"tornado_warning"}
 
 
-async def test_phenomenon_clears_with_the_tombstone(hass):
+async def test_event_clears_with_the_tombstone(hass):
     coordinator = make_coordinator(hass)
     await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
     await coordinator._handle_message(TOPIC_TORNADO, TOMBSTONE)
 
-    assert coordinator.has_phenomenon(SAME_SANTA_ROSA, "TO") is False
+    assert coordinator.has_event(SAME_SANTA_ROSA, "tornado_warning") is False
+    assert coordinator.active_event_keys(SAME_SANTA_ROSA) == set()
 
 
 async def test_counties_are_independent(hass):
@@ -493,7 +500,7 @@ async def test_counties_are_independent(hass):
 
     assert coordinator.highest_severity(SAME_SANTA_ROSA) == "Extreme"
     assert coordinator.highest_severity(SAME_AUTAUGA) == "Moderate"
-    assert coordinator.has_phenomenon(SAME_AUTAUGA, "TO") is False
+    assert coordinator.has_event(SAME_AUTAUGA, "tornado_warning") is False
 
 
 # ---------------------------------------------------------------------------
@@ -1154,3 +1161,157 @@ async def test_the_will_marks_the_feed_dead(hass):
     )
 
     assert coordinator.glm_available is False
+
+
+# ---------------------------------------------------------------------------
+# Hazard transitions — what the device triggers fire on
+# ---------------------------------------------------------------------------
+
+
+async def test_a_new_hazard_type_fires_a_begin(hass):
+    coordinator = make_coordinator(hass)
+    coordinator._priming_until = 0.0
+    fired = async_capture_events(hass, EVENT_HAZARD)
+
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    await hass.async_block_till_done()
+
+    assert len(fired) == 1
+    data = fired[0].data
+    assert data["event_type"] == "tornado_warning"
+    assert data["action"] == HAZARD_BEGIN
+    assert data["same"] == SAME_SANTA_ROSA
+    assert data["event"] == "Tornado Warning"
+    assert data["headline"] == TORNADO_ALERT["headline"]
+
+
+async def test_the_tombstone_fires_an_end(hass):
+    coordinator = make_coordinator(hass)
+    coordinator._priming_until = 0.0
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    fired = async_capture_events(hass, EVENT_HAZARD)
+
+    await coordinator._handle_message(TOPIC_TORNADO, TOMBSTONE)
+    await hass.async_block_till_done()
+
+    assert [(e.data["event_type"], e.data["action"]) for e in fired] == [
+        ("tornado_warning", HAZARD_END)
+    ]
+
+
+async def test_an_update_to_a_live_hazard_is_not_a_new_one(hass):
+    """A CON statement re-publishes the same topic. Firing on it would make a
+    "tornado warning begins" trigger repeat every few minutes for one storm."""
+    coordinator = make_coordinator(hass)
+    coordinator._priming_until = 0.0
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    fired = async_capture_events(hass, EVENT_HAZARD)
+
+    await coordinator._handle_message(
+        TOPIC_TORNADO, encode({**TORNADO_ALERT, "action": "CON"})
+    )
+    await hass.async_block_till_done()
+
+    assert fired == []
+
+
+async def test_a_second_warning_of_a_live_type_is_not_a_new_hazard(hass):
+    """Two tornado warnings at once is one hazard type in effect. The
+    per-alert EVENT_ALERT still fires for the second; this one must not, or a
+    take-cover automation runs twice for one storm."""
+    coordinator = make_coordinator(hass)
+    coordinator._priming_until = 0.0
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    fired = async_capture_events(hass, EVENT_HAZARD)
+
+    second = {**TORNADO_ALERT, "vtec": "KMOB.TO.W.0013.2026", "etn": 13}
+    await coordinator._handle_message(f"{TOPIC_TORNADO}b", encode(second))
+    await hass.async_block_till_done()
+
+    assert fired == []
+    assert len(coordinator.alerts_for_event(SAME_SANTA_ROSA, "tornado_warning")) == 2
+
+
+async def test_the_end_waits_for_the_last_product_of_a_type(hass):
+    """With two warnings live, the first tombstone must not announce the end."""
+    coordinator = make_coordinator(hass)
+    coordinator._priming_until = 0.0
+    second_topic = f"{TOPIC_TORNADO}b"
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    await coordinator._handle_message(
+        second_topic, encode({**TORNADO_ALERT, "etn": 13})
+    )
+    fired = async_capture_events(hass, EVENT_HAZARD)
+
+    await coordinator._handle_message(TOPIC_TORNADO, TOMBSTONE)
+    await hass.async_block_till_done()
+    assert fired == []
+
+    await coordinator._handle_message(second_topic, TOMBSTONE)
+    await hass.async_block_till_done()
+    assert [e.data["action"] for e in fired] == [HAZARD_END]
+
+
+async def test_the_retained_burst_announces_no_hazard(hass):
+    """Same reason EVENT_ALERT suppresses it: every HA restart would otherwise
+    re-fire every take-cover automation for hazards already in effect."""
+    coordinator = make_coordinator(hass)
+    coordinator._handle_connection(True)
+    fired = async_capture_events(hass, EVENT_HAZARD)
+
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+    await hass.async_block_till_done()
+
+    assert fired == []
+    # Suppressed on the bus, but the state is real: the binary sensor is on.
+    assert coordinator.has_event(SAME_SANTA_ROSA, "tornado_warning") is True
+
+
+async def test_an_expiry_during_priming_is_still_announced(hass):
+    """Ends are not suppressed. The set starts empty on a restart, so priming
+    cannot manufacture one — and a hazard that really ends in those five
+    seconds is worth delivering."""
+    coordinator = make_coordinator(hass)
+    coordinator._priming_until = 0.0
+    await coordinator._handle_message(TOPIC_TORNADO, encode(TORNADO_ALERT))
+
+    coordinator._handle_connection(True)  # restarts the priming window
+    fired = async_capture_events(hass, EVENT_HAZARD)
+    await coordinator._handle_message(TOPIC_TORNADO, TOMBSTONE)
+    await hass.async_block_till_done()
+
+    assert [e.data["action"] for e in fired] == [HAZARD_END]
+
+
+async def test_counties_fire_their_own_transitions(hass):
+    coordinator = make_coordinator(hass, [LOCATION_SANTA_ROSA, LOCATION_AUTAUGA])
+    coordinator._priming_until = 0.0
+    fired = async_capture_events(hass, EVENT_HAZARD)
+
+    await coordinator._handle_message(TOPIC_HEAT, encode(HEAT_ALERT))
+    await hass.async_block_till_done()
+
+    assert len(fired) == 1
+    assert fired[0].data["same"] == SAME_AUTAUGA
+    assert fired[0].data["event_type"] == "heat_advisory"
+    assert fired[0].data["location"] == "Cabin"
+
+
+async def test_alerts_rank_by_significance_within_a_severity(hass):
+    """NWS gives a Tornado Watch and a Severe Thunderstorm Warning the same
+    severity, so severity alone would order them by arrival."""
+    coordinator = make_coordinator(hass)
+    watch = {
+        **TORNADO_ALERT,
+        "significance": "A",
+        "event": "Tornado Watch",
+        "severity": "Severe",
+    }
+    await coordinator._handle_message(f"{TOPIC_TORNADO}9", encode(watch))
+    await coordinator._handle_message(TOPIC_SEVERE, encode(SEVERE_ALERT))
+
+    ranked = coordinator.alerts_for(SAME_SANTA_ROSA)
+    assert [alert["event"] for alert in ranked] == [
+        "Severe Thunderstorm Warning",
+        "Tornado Watch",
+    ]

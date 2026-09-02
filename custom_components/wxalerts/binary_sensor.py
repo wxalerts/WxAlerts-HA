@@ -1,7 +1,13 @@
-"""Binary sensors: any-active-alert per county, optional per-phenomenon sensors
-(tornado, severe thunderstorm, ...) that read far better in automations than
-string-matching attributes, and the lightning proximity sensor that a
-seek-shelter automation triggers on.
+"""Binary sensors: any-active-alert per county, one sensor per NWS event type
+the user selected, and the lightning proximity sensor a seek-shelter
+automation triggers on.
+
+Through 0.3.x these were six hardcoded phenomenon buckets, which collapsed the
+distinction the products exist to draw: a Tornado Watch and a Tornado Warning
+both turned on "Tornado alert", so an automation could not tell "conditions are
+favourable" from "take cover now". Selection is per event type now — the
+phenomenon and the significance together — and the catalogue covers every type
+NWS publishes.
 """
 
 from __future__ import annotations
@@ -17,15 +23,19 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import WxAlertsConfigEntry
 from .const import (
-    CONF_PHENOMENON_SENSORS,
-    DEFAULT_PHENOMENON_SENSORS,
     LOC_COUNTY,
     LOC_SAME,
-    PHENOMENON_SENSOR_TYPES,
 )
 from .coordinator import WxAlertsCoordinator
 from .entity import WxAlertsLocationEntity, WxAlertsTargetEntity
+from .events import BY_KEY, EventType, event_name_for
 from .lightning import Target
+from .options import selected_event_keys
+
+# Only these carry the safety device class, which renders as Safe/Unsafe. A
+# watch means conditions are favourable, not that anyone is currently in
+# danger, and labelling one "Unsafe" trains people to ignore the word.
+_URGENT_SUFFIXES = ("Warning", "Emergency", "Immediate")
 
 
 async def async_setup_entry(
@@ -54,10 +64,11 @@ async def async_setup_entry(
         async_add_entities(entities)
         return
 
-    options = {**entry.data, **entry.options}
-    phenomenon_sensors = options.get(
-        CONF_PHENOMENON_SENSORS, DEFAULT_PHENOMENON_SENSORS
-    )
+    # Unknown keys are skipped rather than fatal: an options blob written by a
+    # newer release must not stop the platform loading after a downgrade.
+    selected = [
+        BY_KEY[key] for key in selected_event_keys(entry) if key in BY_KEY
+    ]
 
     seen_same: set[str] = set()
     for location in coordinator.locations:
@@ -66,11 +77,9 @@ async def async_setup_entry(
             continue
         seen_same.add(same)
         entities.append(ActiveAlertBinarySensor(coordinator, location))
-        if phenomenon_sensors:
-            entities.extend(
-                PhenomenonBinarySensor(coordinator, location, code, label)
-                for code, label in PHENOMENON_SENSOR_TYPES.items()
-            )
+        entities.extend(
+            EventBinarySensor(coordinator, location, event) for event in selected
+        )
     async_add_entities(entities)
 
 
@@ -97,47 +106,62 @@ class ActiveAlertBinarySensor(WxAlertsLocationEntity, BinarySensorEntity):
             "same": self.same,
             "county_ugc": self.location.get(LOC_COUNTY),
             "alert_count": len(alerts),
-            "events": [alert.get("event") for alert in alerts],
+            "events": [event_name_for(alert) for alert in alerts],
+            "event_types": sorted(self.coordinator.active_event_keys(self.same)),
         }
 
 
-class PhenomenonBinarySensor(WxAlertsLocationEntity, BinarySensorEntity):
-    """On when a specific phenomenon (TO, SV, FF, ...) is live."""
-
-    _attr_device_class = BinarySensorDeviceClass.SAFETY
+class EventBinarySensor(WxAlertsLocationEntity, BinarySensorEntity):
+    """On while one NWS event type is in effect for this county."""
 
     def __init__(
         self,
         coordinator: WxAlertsCoordinator,
         location: dict[str, Any],
-        phenomenon: str,
-        label: str,
+        event: EventType,
     ) -> None:
         super().__init__(coordinator, location)
-        self._phenomenon = phenomenon
-        self._attr_name = f"{label} alert"
+        self._event = event
+        self._attr_name = event.name
+        # Keyed on the catalogue key, not the VTEC pair: several codes can fold
+        # into one type (WC.W and EC.W are both Extreme Cold Warning), and the
+        # entity has to survive the table gaining another.
         self._attr_unique_id = (
-            f"{coordinator.entry.entry_id}_{self.same}_phen_{phenomenon.lower()}"
+            f"{coordinator.entry.entry_id}_{self.same}_event_{event.key}"
         )
-        self._attr_entity_registry_enabled_default = phenomenon in ("TO", "SV", "FF")
+        if event.name.endswith(_URGENT_SUFFIXES):
+            self._attr_device_class = BinarySensorDeviceClass.SAFETY
 
     @property
     def is_on(self) -> bool:
-        return self.coordinator.has_phenomenon(self.same, self._phenomenon)
+        return self.coordinator.has_event(self.same, self._event.key)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        live = [
-            {
-                "event": alert.get("event"),
-                "significance": alert.get("significance"),
-                "headline": alert.get("headline"),
-                "ends": alert.get("ends"),
-            }
-            for alert in self.coordinator.alerts_for(self.same)
-            if alert.get("phenomena") == self._phenomenon
-        ]
-        return {"phenomenon": self._phenomenon, "alerts": live}
+        alerts = self.coordinator.alerts_for_event(self.same, self._event.key)
+        return {
+            "event_type": self._event.key,
+            "event": self._event.name,
+            "same": self.same,
+            # Several live products for one type is normal, so the count is
+            # reported rather than assumed to be one.
+            "alert_count": len(alerts),
+            "alerts": [
+                {
+                    "vtec": alert.get("vtec"),
+                    "event": alert.get("event"),
+                    "severity": alert.get("severity"),
+                    "urgency": alert.get("urgency"),
+                    "certainty": alert.get("certainty"),
+                    "headline": alert.get("headline"),
+                    "instruction": alert.get("instruction"),
+                    "onset": alert.get("onset"),
+                    "ends": alert.get("ends"),
+                    "action": alert.get("action"),
+                }
+                for alert in alerts
+            ],
+        }
 
 
 class LightningNearbyBinarySensor(WxAlertsTargetEntity, BinarySensorEntity):

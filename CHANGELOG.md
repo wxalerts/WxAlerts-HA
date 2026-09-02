@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.4.0
+
+Alerts become selectable by NWS event type instead of by phenomenon bucket.
+
+**Breaking.** The six per-phenomenon binary sensors (Tornado, Severe
+Thunderstorm, Flash Flood, Flood, Winter Storm, Heat) are gone, along with the
+`phenomenon_sensors` toggle that switched them on. They matched on the VTEC
+phenomenon alone, so a Tornado Watch and a Tornado Warning both turned on one
+`Tornado alert` sensor — a take-cover automation could not tell the two apart.
+Their registry entries are removed automatically on upgrade rather than left
+sitting as unavailable, so an automation still pointed at one breaks visibly
+now instead of silently never firing again. Repoint them at the new sensors.
+
+- **All 122 NWS event types are selectable**, in options, as binary sensors:
+  `binary_sensor.wxalerts_home_tornado_warning`,
+  `binary_sensor.wxalerts_home_blizzard_warning`, and so on. An upgraded entry
+  and a fresh install both start with the hazards that can kill someone asleep
+  — Tornado, Severe Thunderstorm, Flash Flood, Extreme Wind, Hurricane,
+  Blizzard, Ice Storm, Snow Squall and Tsunami warnings.
+- **Device triggers for the whole catalogue, with no configuration.** Each
+  county device offers every event type as a *begins* and an *ends* trigger in
+  the automation editor. Nothing is created in the entity registry, so the
+  types you have not selected are still automatable.
+- **New `wxalerts_hazard` event**, fired when an event type starts or stops
+  being in effect for a county. Distinct from `wxalerts_alert`, which fires per
+  product: two simultaneous tornado warnings are two alerts but one hazard, and
+  a take-cover automation should run once. Like `wxalerts_alert`, a *begin* is
+  suppressed during the retained-message replay so a restart re-announces
+  nothing; an *end* is never suppressed, because the set starts empty on a
+  restart and cannot produce a spurious one.
+- **New `Top alert` sensor** per county: the most urgent hazard in effect, by
+  name. Ranking now breaks a severity tie on significance — NWS gives a Tornado
+  Watch and a Severe Thunderstorm Warning the same severity, so severity alone
+  ordered them by arrival.
+- **Names are canonical everywhere.** The two feed paths word the same hazard
+  differently — the VTEC path builds "Fire Weather Warning" where NWS says "Red
+  Flag Warning", "Marine Warning" where NWS says "Special Marine Warning" — so
+  matching resolves the VTEC pair first and falls back to the name only for
+  CAP-only products, which have no VTEC and carry the canonical spelling
+  already. Map markers and the alert list report the canonical name.
+- Retired VTEC codes fold into their replacements: `WC.Y` reads as Cold Weather
+  Advisory, `WC.W`/`EC.W` as Extreme Cold Warning, `EH.W` as Extreme Heat
+  Warning. An office that has not adopted the rename is not invisible.
+
 ## 0.3.0
 
 Lightning becomes a proximity feed rather than a box counter.

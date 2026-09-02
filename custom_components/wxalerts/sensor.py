@@ -31,6 +31,7 @@ from .const import (
 )
 from .coordinator import WxAlertsCoordinator
 from .entity import WxAlertsLocationEntity, WxAlertsTargetEntity
+from .events import event_key_for, event_name_for
 from .lightning import Target
 
 
@@ -51,6 +52,7 @@ async def async_setup_entry(
             seen_same.add(same)
             entities.append(HighestSeveritySensor(coordinator, location))
             entities.append(AlertCountSensor(coordinator, location))
+            entities.append(TopAlertSensor(coordinator, location))
 
     if coordinator.enable_glm:
         # One set per target — a configured zone, or a tracked person. Identity
@@ -123,11 +125,20 @@ class AlertCountSensor(WxAlertsLocationEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        live = self.coordinator.alerts_for(self.same)
         alerts = [
             {
                 "id": alert.get("id"),
                 "vtec": alert.get("vtec"),
-                "event": alert.get("event"),
+                # The canonical name and the key an automation selects on. The
+                # raw field is kept beside them because the two feed paths word
+                # the same hazard differently and a bug report needs to say
+                # which one arrived.
+                "event": event_name_for(alert),
+                "event_type": event_key_for(alert),
+                "event_raw": alert.get("event"),
+                "phenomena": alert.get("phenomena"),
+                "significance": alert.get("significance"),
                 "severity": alert.get("severity"),
                 "urgency": alert.get("urgency"),
                 "certainty": alert.get("certainty"),
@@ -138,13 +149,61 @@ class AlertCountSensor(WxAlertsLocationEntity, SensorEntity):
                 "action": alert.get("action"),
                 "geometry_source": alert.get("geometry_source"),
             }
-            for alert in self.coordinator.alerts_for(self.same)
+            for alert in live
         ]
         return {
             "same": self.same,
             "county_ugc": self.location.get(LOC_COUNTY),
             "location": self.location.get(LOC_NAME),
+            # Two flat lists beside the full records, because a Markdown card
+            # and a template condition both want the names without walking a
+            # list of dicts to get them.
+            "events": [alert["event"] for alert in alerts],
+            "event_types": [alert["event_type"] for alert in alerts],
             "alerts": alerts,
+        }
+
+
+class TopAlertSensor(WxAlertsLocationEntity, SensorEntity):
+    """The most urgent hazard in effect, by name.
+
+    The count sensor answers "how many"; this answers "what", which is what a
+    notification body and a dashboard header actually want. Ordering is the
+    coordinator's: severity first, then significance, so a Tornado Warning
+    outranks a Tornado Watch that shares its severity.
+    """
+
+    _attr_translation_key = "top_alert"
+    _attr_icon = "mdi:weather-lightning-rainy"
+
+    def __init__(
+        self, coordinator: WxAlertsCoordinator, location: dict[str, Any]
+    ) -> None:
+        super().__init__(coordinator, location)
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_{self.same}_top"
+
+    @property
+    def native_value(self) -> str:
+        alerts = self.coordinator.alerts_for(self.same)
+        # Not an ENUM device class: the catalogue is a superset of what NWS
+        # publishes today and an uncatalogued product still has to be
+        # reportable. An ENUM would log it as an invalid state instead.
+        return event_name_for(alerts[0]) if alerts else SEVERITY_NONE
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        alerts = self.coordinator.alerts_for(self.same)
+        top = alerts[0] if alerts else None
+        return {
+            "same": self.same,
+            "location": self.location.get(LOC_NAME),
+            "event_type": event_key_for(top) if top else None,
+            "severity": top.get("severity") if top else SEVERITY_NONE,
+            "headline": top.get("headline") if top else None,
+            "instruction": top.get("instruction") if top else None,
+            "onset": top.get("onset") if top else None,
+            "ends": top.get("ends") if top else None,
+            "alert_count": len(alerts),
         }
 
 

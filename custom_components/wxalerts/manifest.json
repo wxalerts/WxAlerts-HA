@@ -1,13 +1,18 @@
 {
   "domain": "wxalerts",
   "name": "WxAlerts",
-  "codeowners": ["@wxalerts", "@kn4oqw-clint"],
+  "codeowners": [
+    "@wxalerts",
+    "@kn4oqw-clint"
+  ],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/wxalerts/WxAlerts-HA",
   "integration_type": "hub",
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/wxalerts/WxAlerts-HA/issues",
-  "requirements": ["aiomqtt>=2.3.0"],
-  "version": "0.3.0"
+  "requirements": [
+    "aiomqtt>=2.3.0"
+  ],
+  "version": "0.4.0"
 }

@@ -25,13 +25,13 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     CONF_ENABLE_ALERTS,
     CONF_ENABLE_GLM,
+    CONF_EVENT_SENSORS,
     CONF_GLM_ALERT,
     CONF_GLM_BACKFILL,
     CONF_GLM_PERSONS,
     CONF_GLM_RADIUS,
     CONF_GLM_WINDOW,
     CONF_LOCATIONS,
-    CONF_PHENOMENON_SENSORS,
     CONF_ZONES,
     DEFAULT_ENABLE_ALERTS,
     DEFAULT_ENABLE_GLM,
@@ -40,7 +40,6 @@ from .const import (
     DEFAULT_GLM_PERSONS,
     DEFAULT_GLM_RADIUS,
     DEFAULT_GLM_WINDOW,
-    DEFAULT_PHENOMENON_SENSORS,
     DOMAIN,
     LOC_COUNTY,
     LOC_GEOHASH,
@@ -52,7 +51,9 @@ from .const import (
     LOC_ZONE_ENTITY,
     NWS_POINTS_URL,
 )
+from .events import DEFAULT_EVENT_KEYS, SELECTABLE_EVENTS
 from .geo import geohash_encode, same_from_county_url
+from .options import selected_event_keys
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +61,22 @@ _USER_AGENT = "WxAlerts-HA (github.com/wxalerts/WxAlerts-HA)"
 
 _ZONE_SELECTOR = selector.EntitySelector(
     selector.EntitySelectorConfig(domain="zone", multiple=True)
+)
+
+# Every NWS event type, searchable. Sorted by name rather than grouped by
+# hazard family, because the box is a search box first: someone who wants a
+# blizzard sensor types "bliz", and a family grouping only helps the much rarer
+# case of browsing for something whose name you do not know.
+_EVENT_SELECTOR = selector.SelectSelector(
+    selector.SelectSelectorConfig(
+        options=[
+            selector.SelectOptionDict(value=event.key, label=event.name)
+            for event in SELECTABLE_EVENTS
+        ],
+        multiple=True,
+        mode=selector.SelectSelectorMode.DROPDOWN,
+        sort=False,
+    )
 )
 
 
@@ -186,6 +203,10 @@ class WxAlertsConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_LOCATIONS: locations,
                             CONF_ENABLE_ALERTS: user_input[CONF_ENABLE_ALERTS],
                             CONF_ENABLE_GLM: user_input[CONF_ENABLE_GLM],
+                            # Written explicitly rather than left to the
+                            # legacy fallback, so a fresh entry never depends
+                            # on a migration path to know what it selected.
+                            CONF_EVENT_SENSORS: list(DEFAULT_EVENT_KEYS),
                         },
                     )
 
@@ -248,7 +269,9 @@ class WxAlertsOptionsFlow(OptionsFlow):
                         CONF_GLM_BACKFILL: user_input.get(
                             CONF_GLM_BACKFILL, DEFAULT_GLM_BACKFILL
                         ).strip(),
-                        CONF_PHENOMENON_SENSORS: user_input[CONF_PHENOMENON_SENSORS],
+                        CONF_EVENT_SENSORS: user_input.get(
+                            CONF_EVENT_SENSORS, []
+                        ),
                     },
                 )
 
@@ -300,12 +323,11 @@ class WxAlertsOptionsFlow(OptionsFlow):
                 ): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
                 ),
-                vol.Required(
-                    CONF_PHENOMENON_SENSORS,
-                    default=current.get(
-                        CONF_PHENOMENON_SENSORS, DEFAULT_PHENOMENON_SENSORS
-                    ),
-                ): selector.BooleanSelector(),
+                # Not vol.Required: an empty list is a legitimate answer
+                # (device triggers alone), and Required would reject it.
+                vol.Optional(
+                    CONF_EVENT_SENSORS, default=selected_event_keys(entry)
+                ): _EVENT_SELECTOR,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

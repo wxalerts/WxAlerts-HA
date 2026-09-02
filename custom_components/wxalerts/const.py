@@ -35,7 +35,11 @@ CONF_GLM_ALERT = "glm_alert_mi"  # drives the safety binary sensor
 CONF_GLM_WINDOW = "glm_window_minutes"
 CONF_GLM_PERSONS = "glm_track_persons"
 CONF_GLM_BACKFILL = "glm_backfill_url"
+# Legacy: a single switch for the six hardcoded phenomenon buckets. Read
+# only during migration, never written.
 CONF_PHENOMENON_SENSORS = "phenomenon_sensors"
+# Catalogue keys the user picked; one binary sensor per key per location.
+CONF_EVENT_SENSORS = "event_sensors"
 
 # Per-location dict keys (stored in the config entry)
 LOC_ZONE_ENTITY = "zone_entity_id"
@@ -62,7 +66,6 @@ DEFAULT_GLM_PERSONS = False
 DEFAULT_GLM_BACKFILL = ""
 BACKFILL_PATH = "/glm/flashes"
 BACKFILL_TIMEOUT = 20
-DEFAULT_PHENOMENON_SENSORS = True
 
 # Ring counts published as their own sensors, in miles. Rings at or beyond the
 # configured radius are dropped rather than reported as a smaller circle.
@@ -90,7 +93,15 @@ GLM_STALE_SECONDS = 600
 # ---------------------------------------------------------------------------
 # Events / dispatcher signals
 # ---------------------------------------------------------------------------
+# Fired once per newly issued hazard, carrying that one product.
 EVENT_ALERT = "wxalerts_alert"
+# Fired when an event TYPE starts or stops being in effect for a location.
+# Distinct from EVENT_ALERT: a second tornado warning while one is already
+# live is a new alert but not a new hazard type, and a device trigger that
+# fired on it would announce a tornado that was already being announced.
+EVENT_HAZARD = "wxalerts_hazard"
+HAZARD_BEGIN = "begin"
+HAZARD_END = "end"
 
 SIGNAL_ALERTS_UPDATED = f"{DOMAIN}_alerts_updated"  # + _{entry_id}_{same}
 SIGNAL_GLM_UPDATED = f"{DOMAIN}_glm_updated"  # + _{entry_id}_{target_key}
@@ -102,15 +113,15 @@ SIGNAL_CONNECTION = f"{DOMAIN}_connection"  # + _{entry_id}
 SEVERITY_ORDER = ["Extreme", "Severe", "Moderate", "Minor"]
 SEVERITY_NONE = "None"
 
-# Phenomena for the optional per-phenomenon binary sensors.
-PHENOMENON_SENSOR_TYPES: dict[str, str] = {
-    "TO": "Tornado",
-    "SV": "Severe Thunderstorm",
-    "FF": "Flash Flood",
-    "FA": "Flood",
-    "WS": "Winter Storm",
-    "HT": "Heat",
-}
+# Tie-break within one severity. NWS assigns severity per product type, so a
+# Tornado Watch and a Severe Thunderstorm Warning are both "Severe" — without
+# this the top-alert sensor would pick between them by dictionary order.
+SIGNIFICANCE_ORDER = ["W", "A", "Y", "S", "F", "O", "N"]
+
+# The six phenomenon buckets shipped through 0.3.x, mapped to the catalogue
+# keys that replace them. Only used to clean their orphaned entities out of the
+# registry on upgrade; see async_migrate_entry.
+LEGACY_PHENOMENON_CODES: tuple[str, ...] = ("TO", "SV", "FF", "FA", "WS", "HT")
 
 # ---------------------------------------------------------------------------
 # NWS point metadata API (used once, during config flow, to resolve a zone

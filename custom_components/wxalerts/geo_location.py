@@ -18,6 +18,7 @@ from homeassistant.util.location import distance as location_distance
 from . import WxAlertsConfigEntry
 from .const import DOMAIN, LOC_SAME, SIGNAL_ALERTS_UPDATED
 from .coordinator import WxAlertsCoordinator
+from .events import event_key_for, event_name_for
 from .geo import geometry_centroid
 
 SOURCE = DOMAIN
@@ -123,7 +124,9 @@ class AlertMarker(GeolocationEvent):
         alert = self._current_alert()
         if alert is None:
             return
-        self._attr_name = alert.get("event") or "Weather alert"
+        # The catalogue's spelling, so the marker on the map and the binary
+        # sensor in the automation agree on what the hazard is called.
+        self._attr_name = event_name_for(alert)
         centroid = geometry_centroid(alert.get("geometry"))
         if centroid:
             self._attr_latitude, self._attr_longitude = centroid
@@ -161,6 +164,7 @@ class AlertMarker(GeolocationEvent):
         alert = self._current_alert() or {}
         return {
             "same": self._same,
+            "event_type": event_key_for(alert) if alert else None,
             "vtec": alert.get("vtec"),
             "severity": alert.get("severity"),
             "headline": alert.get("headline"),

@@ -24,14 +24,41 @@ Each zone is resolved once, during setup, to:
 
 Both feeds are optional toggles — run alerts only, lightning only, or both.
 
+### Alert types
+
+Automations key on the **event type** — `Tornado Warning`, `Tornado Watch`,
+`Blizzard Warning`, `Red Flag Warning` — not on a phenomenon bucket. The
+phenomenon and the significance together are what an NWS product means, and
+they are the difference between "conditions are favourable" and "take cover
+now".
+
+All 122 types are available two ways, and you do not have to choose one:
+
+- **Device triggers**, with no setup at all. In the automation editor pick the
+  county device and the trigger list carries every type, as *begins* and
+  *ends*. Nothing is created in the entity registry.
+- **Binary sensors**, for the types you select in options. These are what a
+  dashboard card, a template, or a condition can read. A fresh install selects
+  the hazards that can kill someone asleep — Tornado, Severe Thunderstorm,
+  Flash Flood, Extreme Wind, Hurricane, Blizzard, Ice Storm, Snow Squall and
+  Tsunami warnings — and nothing else.
+
+The catalogue covers every type `api.weather.gov/alerts/types` publishes, plus
+VTEC codes NWS has retired but offices can still issue. Retired codes fold into
+their replacements, so an office still sending `WC.Y` lands on Cold Weather
+Advisory with everyone else, and a product this catalogue has never seen still
+appears in the alert list — it just cannot be picked in options until the
+catalogue learns it.
+
 ### Entities per county
 
 | Entity | Description |
 |---|---|
 | `binary_sensor` — Active alert | On when any hazard is live. `device_class: safety`. |
 | `sensor` — Highest severity | `Extreme` / `Severe` / `Moderate` / `Minor` / `None`. |
-| `sensor` — Active alerts | Count, with the full alert list (headline, instruction, times, geometry source) in attributes for Markdown cards. |
-| `binary_sensor` — per phenomenon | Tornado, Severe Thunderstorm, Flash Flood on by default; Flood, Winter Storm, Heat available but disabled. Toggle the whole set in options. |
+| `sensor` — Active alerts | Count, with the full alert list (event type, headline, instruction, times, geometry source) in attributes for Markdown cards, plus flat `events` and `event_types` lists. |
+| `sensor` — Top alert | The most urgent hazard in effect, by name — `Tornado Warning`, `Heat Advisory`, `None`. Ranked by severity, then by significance, so a warning outranks a watch that shares its severity. |
+| `binary_sensor` — per alert type | One per NWS event type you selected in options. `binary_sensor.wxalerts_home_tornado_warning` and the rest. |
 | `geo_location` — map markers | One marker per live hazard at its polygon centroid; the full GeoJSON polygon is an attribute. Markers vanish when the hazard ends. |
 
 ### Entities per lightning target
@@ -127,6 +154,39 @@ automation:
 
 A simpler automation keyed on the binary sensor:
 
+Or on the hazard type itself, which is what most automations want. A
+`wxalerts_hazard` event fires when a type **starts or stops** being in effect
+for a county — once, no matter how many products describe it, so two
+simultaneous tornado warnings do not announce a tornado twice:
+
+```yaml
+automation:
+  - alias: Take cover
+    trigger:
+      - platform: device
+        domain: wxalerts
+        device_id: <the county device>
+        type: tornado_warning_begin
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          message: "{{ trigger.event.data.headline }}"
+```
+
+The same thing without the device picker, if you prefer YAML:
+
+```yaml
+    trigger:
+      - platform: event
+        event_type: wxalerts_hazard
+        event_data:
+          same: "012113"
+          event_type: tornado_warning
+          action: begin
+```
+
+A simpler automation keyed on the binary sensor:
+
 ```yaml
 automation:
   - alias: Any alert light
@@ -161,10 +221,12 @@ Settings → Devices & Services → WxAlerts → **Configure**:
 
 - change the watched zones (they are re-resolved on save)
 - enable/disable NWS alerts and GLM lightning independently
-- lightning box size: geohash characters, 3 ≈ regional (~150 km),
-  4 ≈ county (~39 km), 5 ≈ neighborhood (~4.9 km)
+- **alert types to create sensors for** — searchable, all 122 of them; leave it
+  empty to run on device triggers alone
+- lightning radius (miles) and seek-shelter distance (miles)
 - lightning rolling window (minutes)
-- per-phenomenon binary sensors on/off
+- also track people with a GPS fix
+- lightning history URL, to fill the window on startup
 
 ## How it connects
 
