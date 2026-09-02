@@ -175,3 +175,11 @@ def test_the_catalogue_covers_every_type_nws_publishes(allow_the_internet):
 
     catalogued = {event.name for event in EVENT_TYPES}
     assert published - catalogued == set()
+
+
+def test_the_test_product_resolves_under_either_spelling():
+    """NWS's type list says "Test"; the products on the feed say "Test
+    Message". Caught by resolving every live hazard against the catalogue —
+    the type list alone would have missed it."""
+    assert event_key_for({"event": "Test"}) == "test"
+    assert event_key_for({"event": "Test Message"}) == "test"

@@ -215,7 +215,10 @@ EVENT_TYPES: tuple[EventType, ...] = (
     _e("Blue Alert"),
     _e("911 Telephone Outage"),
     _e("Administrative Message"),
-    _e("Test"),
+    # api.weather.gov/alerts/types calls it "Test"; the feed carries live
+    # products spelled "Test Message". Found by resolving every hazard on the
+    # feed against this table, not by reading the type list.
+    _e("Test", aliases=("Test Message",)),
 )
 
 
