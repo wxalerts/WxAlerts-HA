@@ -21,6 +21,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
+from custom_components.wxalerts.coordinator import entry_device
 from custom_components.wxalerts.const import CONF_PLACES, DOMAIN
 
 from .conftest import feed, make_entry, start
@@ -242,8 +243,8 @@ async def test_a_renamed_place_renames_its_device(hass, config_entry, setup_inte
         encode([{**PLACE_HOME, "name": "House"}, PLACE_CABIN]),
     )
 
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(DOMAIN, f"{config_entry.entry_id}_place_101")}
+    device = entry_device(
+        hass, config_entry.entry_id, (DOMAIN, f"{config_entry.entry_id}_place_101")
     )
     assert device.name == "WxAlerts House"
     # Entity ids are not rewritten under the user.

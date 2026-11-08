@@ -262,6 +262,24 @@ def place_device_identifier(entry_id: str, place_id: str) -> tuple[str, str]:
     return (DOMAIN, f"{entry_id}_place_{place_id}")
 
 
+def entry_device(
+    hass: HomeAssistant, entry_id: str, identifier: tuple[str, str]
+) -> dr.DeviceEntry | None:
+    """The device of this config entry carrying ``identifier``.
+
+    Searched within the entry's own devices rather than with
+    ``async_get_device``: identifiers are no longer unique across config
+    entries, and that lookup is deprecated (it stops working in 2027.8).
+    ``async_entries_for_config_entry`` exists on every supported release, so
+    no version shim is needed.
+    """
+    registry = dr.async_get(hass)
+    for device in dr.async_entries_for_config_entry(registry, entry_id):
+        if identifier in device.identifiers:
+            return device
+    return None
+
+
 def service_device_identifier(entry_id: str) -> tuple[str, str]:
     """Device registry identifier for the account-wide feed device."""
     return (DOMAIN, f"{entry_id}_service")
@@ -849,8 +867,8 @@ class WxAlertsCoordinator:
             self._remove_stale_place_devices(set(new))
         for place in changed:
             if place.id in old and old[place.id].name != place.name:
-                device = device_registry.async_get_device(
-                    identifiers={place_device_identifier(entry_id, place.id)}
+                device = entry_device(
+                    self.hass, entry_id, place_device_identifier(entry_id, place.id)
                 )
                 if device is not None:
                     device_registry.async_update_device(

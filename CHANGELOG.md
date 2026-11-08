@@ -59,7 +59,9 @@ sign in to wxalerts.org. See *Upgrading from 0.x* in the README.
 - **Fixes:** the config entry is versioned and migrated (`async_migrate_entry`)
   instead of claiming a migration that did not exist; platforms use
   `AddConfigEntryEntitiesCallback`; the manifest declares
-  `single_config_entry`.
+  `single_config_entry`; devices are looked up within the entry and removed
+  with `async_remove_device`, clear of the device registry calls deprecated
+  for 2027.8.
 - Requires Home Assistant 2025.2.0 or newer.
 
 ## 0.4.0

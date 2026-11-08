@@ -8,6 +8,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.wxalerts.coordinator import entry_device
 from custom_components.wxalerts.const import (
     API_INSTANCES_URL,
     OAUTH_AUTHORIZE_URL,
@@ -245,8 +246,8 @@ async def test_a_stale_place_device_can_be_deleted_and_a_live_one_cannot(
     from custom_components.wxalerts import async_remove_config_entry_device
 
     device_registry = dr.async_get(hass)
-    live = device_registry.async_get_device(
-        identifiers={(DOMAIN, f"{config_entry.entry_id}_place_101")}
+    live = entry_device(
+        hass, config_entry.entry_id, (DOMAIN, f"{config_entry.entry_id}_place_101")
     )
     gone = device_registry.async_get_or_create(
         config_entry_id=config_entry.entry_id,

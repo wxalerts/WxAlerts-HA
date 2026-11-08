@@ -21,6 +21,7 @@ from pytest_homeassistant_custom_component.common import (
     async_get_device_automations,
 )
 
+from custom_components.wxalerts.coordinator import entry_device
 from custom_components.wxalerts.const import DOMAIN
 
 from .conftest import make_entry, start
@@ -36,9 +37,7 @@ from .const import (
 
 
 def _device_id(hass, entry, key: str) -> str:
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(DOMAIN, f"{entry.entry_id}_{key}")}
-    )
+    device = entry_device(hass, entry.entry_id, (DOMAIN, f"{entry.entry_id}_{key}"))
     assert device is not None, key
     return device.id
 
