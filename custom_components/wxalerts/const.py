@@ -20,7 +20,7 @@ PRICING_URL = "https://wxalerts.org/pricing/"
 # ===========================================================================
 # Public client: no secret, so it is safe to compile in. Replace the
 # placeholder with the id the authentik application reports.
-HA_OAUTH_CLIENT_ID = "wxalerts-home-assistant"
+HA_OAUTH_CLIENT_ID = "5094664ecabab38b86e8c7153b821f07e994096b"
 # authentik serves one authorize and one token endpoint for every
 # application; the per-application issuer is
 # https://auth.wxalerts.org/application/o/<slug>/. Confirmed against the
