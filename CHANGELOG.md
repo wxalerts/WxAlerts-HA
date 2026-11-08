@@ -64,6 +64,11 @@ sign in to wxalerts.org. See *Upgrading from 0.x* in the README.
   smoke and dust read as fog; squall as windy-variant; funnel cloud and
   tornado as exceptional). A clear observation uses its own `is_day`, falling
   back to the sun.
+- Weather values are rounded to sensible precision (one decimal for
+  temperatures, wind, pressure, visibility and rain; whole numbers for
+  humidity and bearing), in sensors, the weather entity and forecasts alike.
+  Stations with no name (APRS, CWOP) show their id, without the network
+  prefix, as the station.
 - **Feed age.** An account-wide *Feed age* sensor from the server's status
   heartbeat, and a *Connected* sensor. Storm cell entities go unavailable when
   the heartbeat is 15 minutes old or reports offline. A 30 second timer keeps

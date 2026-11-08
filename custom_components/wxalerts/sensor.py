@@ -57,6 +57,7 @@ from .entity import (
     WxAlertsConditionsEntity,
     WxAlertsServiceEntity,
     WxAlertsStormEntity,
+    field_number,
 )
 from .events import event_key_for, event_name_for
 
@@ -97,9 +98,9 @@ CONDITION_SENSORS: tuple[SensorEntityDescription, ...] = (
     _measurement("humidity", COND_HUMIDITY, SensorDeviceClass.HUMIDITY,
                  PERCENTAGE, 0),
     _measurement("wind_speed", COND_WIND_SPEED_KMH, SensorDeviceClass.WIND_SPEED,
-                 UnitOfSpeed.KILOMETERS_PER_HOUR, 0),
+                 UnitOfSpeed.KILOMETERS_PER_HOUR, 1),
     _measurement("wind_gust", COND_WIND_GUST_KMH, SensorDeviceClass.WIND_SPEED,
-                 UnitOfSpeed.KILOMETERS_PER_HOUR, 0),
+                 UnitOfSpeed.KILOMETERS_PER_HOUR, 1),
     _measurement("wind_bearing", COND_WIND_DIRECTION_DEG, _WIND_DIRECTION,
                  DEGREE, 0, _MEASUREMENT_ANGLE),
     _measurement("pressure", COND_PRESSURE_HPA, SensorDeviceClass.ATMOSPHERIC_PRESSURE,
@@ -337,14 +338,8 @@ class ConditionSensor(WxAlertsConditionsEntity, SensorEntity):
         self.entity_description = description
 
     @property
-    def native_value(self) -> float | None:
-        value = (self.observation or {}).get(self.entity_description.key)
-        if isinstance(value, bool) or value is None:
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
+    def native_value(self) -> float | int | None:
+        return field_number(self.observation, self.entity_description.key)
 
 
 class ConditionTextSensor(WxAlertsConditionsEntity, SensorEntity):

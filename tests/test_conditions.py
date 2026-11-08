@@ -23,12 +23,12 @@ SENSORS = {
     TEMPERATURE: ("24.4", "temperature", "°C"),
     "sensor.wxalerts_home_dew_point": ("21.1", "temperature", "°C"),
     "sensor.wxalerts_home_feels_like": ("25.6", "temperature", "°C"),
-    "sensor.wxalerts_home_humidity": ("82.0", "humidity", "%"),
+    "sensor.wxalerts_home_humidity": ("82", "humidity", "%"),
     "sensor.wxalerts_home_wind_speed": ("18.5", "wind_speed", "km/h"),
     "sensor.wxalerts_home_wind_gust": ("33.3", "wind_speed", "km/h"),
-    "sensor.wxalerts_home_wind_bearing": ("200.0", "wind_direction", "°"),
+    "sensor.wxalerts_home_wind_bearing": ("200", "wind_direction", "°"),
     "sensor.wxalerts_home_pressure": ("1012.9", "atmospheric_pressure", "hPa"),
-    "sensor.wxalerts_home_visibility": ("16.09", "distance", "km"),
+    "sensor.wxalerts_home_visibility": ("16.1", "distance", "km"),
     "sensor.wxalerts_home_precipitation_last_hour": ("1.3", "precipitation", "mm"),
 }
 
@@ -220,3 +220,99 @@ def test_every_server_condition_code_maps_to_a_home_assistant_condition():
         assert map_condition(code, True) == day, code
         assert map_condition(code, False) == night, code
         assert {day, night} <= valid, code
+
+
+RAW = dict(
+    temperature_c=3.97677563031894,
+    dewpoint_c=-1.04999,
+    feels_like_c=0.333333,
+    relative_humidity=71.6667,
+    wind_speed_kmh=12.96000001,
+    wind_gust_kmh=27.7777,
+    wind_direction_deg=247.5,
+    pressure_hpa=1013.2499,
+    visibility_km=16.09344,
+    precip_last_hour_mm=0.254,
+)
+
+
+async def test_long_tails_of_digits_are_rounded(hass, setup_integration):
+    await feed(hass, setup_integration, conditions_topic(101), encode(conditions(**RAW)))
+
+    expected = {
+        TEMPERATURE: ("4.0", 1),
+        "sensor.wxalerts_home_dew_point": ("-1.0", 1),
+        "sensor.wxalerts_home_feels_like": ("0.3", 1),
+        "sensor.wxalerts_home_humidity": ("72", 0),
+        "sensor.wxalerts_home_wind_speed": ("13.0", 1),
+        "sensor.wxalerts_home_wind_gust": ("27.8", 1),
+        "sensor.wxalerts_home_wind_bearing": ("248", 0),
+        "sensor.wxalerts_home_pressure": ("1013.2", 1),
+        "sensor.wxalerts_home_visibility": ("16.1", 1),
+        "sensor.wxalerts_home_precipitation_last_hour": ("0.3", 1),
+    }
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    for entity_id, (value, precision) in expected.items():
+        assert hass.states.get(entity_id).state == value, entity_id
+        options = registry.async_get(entity_id).options.get("sensor", {})
+        assert options.get("suggested_display_precision") == precision, entity_id
+
+    weather = hass.states.get(WEATHER).attributes
+    assert weather["temperature"] == 4.0
+    assert weather["humidity"] == 72
+    assert weather["wind_bearing"] == 248
+    assert weather["pressure"] == 1013.2
+    assert weather["wind_speed"] == 13.0
+
+
+async def test_forecast_values_are_rounded(hass, setup_integration):
+    from homeassistant.components.weather import DOMAIN as WEATHER_DOMAIN, SERVICE_GET_FORECASTS
+
+    from .const import forecast, forecast_topic
+
+    payload = forecast()
+    payload["hourly"][2].update(temperature_c=21.456, humidity=63.5, wind_speed_kmh=7.04, precip_mm=0.125)
+    payload["daily"][1].update(temp_high_c=30.04, temp_low_c=19.96, uv_index=7.6)
+    await feed(hass, setup_integration, forecast_topic(101), encode(payload))
+
+    async def get(kind):
+        response = await hass.services.async_call(
+            WEATHER_DOMAIN, SERVICE_GET_FORECASTS,
+            {"entity_id": WEATHER, "type": kind}, blocking=True, return_response=True,
+        )
+        return response[WEATHER]["forecast"]
+
+    hour = (await get("hourly"))[0]
+    assert hour["temperature"] == 21.5
+    assert hour["humidity"] == 64
+    assert hour["wind_speed"] == 7.0
+    assert hour["precipitation"] == 0.1
+    day = (await get("daily"))[0]
+    assert day["temperature"] == 30.0
+    assert day["templow"] == 20.0
+    assert day["uv_index"] == 8
+
+
+@pytest.mark.parametrize(
+    ("station_id", "station_name", "expected"),
+    [
+        ("aprs:KN4OQW-13", None, "KN4OQW-13"),
+        ("cwop:EW1234", None, "EW1234"),
+        ("KNDZ", None, "KNDZ"),
+        ("KNDZ", "Whiting Field", "Whiting Field"),
+    ],
+)
+async def test_the_station_label_falls_back_to_the_id(
+    hass, setup_integration, station_id, station_name, expected
+):
+    await feed(
+        hass,
+        setup_integration,
+        conditions_topic(101),
+        encode(conditions(station_id=station_id, station_name=station_name)),
+    )
+    assert hass.states.get(WEATHER).attributes["station"] == expected
+    assert hass.states.get(TEMPERATURE).attributes["station"] == expected
+    assert hass.states.get(WEATHER).attributes["station_id"] == station_id

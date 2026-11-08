@@ -136,6 +136,10 @@ snow are snowy-rainy; snow and heavy snow are snowy; hail is hail;
 thunderstorm is lightning-rainy; squall is windy-variant; funnel cloud and
 tornado are exceptional.
 
+Values are rounded: one decimal for temperatures, wind, pressure, visibility
+and rain, whole numbers for humidity and bearing. A station with no name
+(APRS and CWOP) shows its id, such as `KN4OQW-13`.
+
 These are unavailable when the latest observation is more than two hours old
 or missing, and a reading the station did not report is unknown.
 

@@ -10,6 +10,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 
 from .const import (
+    FIELD_DIGITS,
     COND_DISTANCE_KM,
     COND_OBSERVED_AT,
     COND_STATION_ID,
@@ -29,6 +30,41 @@ from .coordinator import (
 )
 
 MANUFACTURER = "WxAlerts.org"
+
+
+def field_number(data: dict[str, Any] | None, field: str) -> float | int | None:
+    """A numeric field rounded to its FIELD_DIGITS, or None.
+
+    Stations and models report long tails of digits (3.97677563031894); the
+    state should read 4.0. Whole-number fields come back as int.
+    """
+    value = (data or {}).get(field)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    digits = FIELD_DIGITS.get(field)
+    if digits is None:
+        return number
+    if digits == 0:
+        return int(round(number))
+    return round(number, digits)
+
+
+def station_label(observation: dict[str, Any]) -> str | None:
+    """The station's name, or its id without the network prefix.
+
+    APRS and CWOP stations have no name; "aprs:KN4OQW-13" reads KN4OQW-13.
+    """
+    name = observation.get(COND_STATION_NAME)
+    if name:
+        return name
+    station_id = observation.get(COND_STATION_ID)
+    if not station_id:
+        return None
+    return str(station_id).split(":", 1)[-1]
 
 
 def place_device_info(entry_id: str, place: Place) -> DeviceInfo:
@@ -175,7 +211,7 @@ class WxAlertsConditionsEntity(WxAlertsPlaceEntity):
         observation = self.observation or {}
         return {
             "station_id": observation.get(COND_STATION_ID),
-            "station": observation.get(COND_STATION_NAME),
+            "station": station_label(observation),
             "distance_km": observation.get(COND_DISTANCE_KM),
             "observed_at": observation.get(COND_OBSERVED_AT),
         }

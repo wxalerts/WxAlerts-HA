@@ -78,7 +78,7 @@ from .const import (
     COND_WIND_SPEED_KMH,
 )
 from .coordinator import Place, WxAlertsCoordinator
-from .entity import WxAlertsConditionsEntity, WxAlertsPlaceEntity
+from .entity import WxAlertsConditionsEntity, WxAlertsPlaceEntity, field_number
 
 # A clear sky reads "sunny" by day and "clear-night" by night; every other
 # condition is the same either way.
@@ -206,19 +206,13 @@ async def async_setup_entry(
     )
 
 
-def _number(observation: dict[str, Any], field: str) -> float | None:
-    value = observation.get(field)
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+def _number(data: dict[str, Any], field: str) -> float | int | None:
+    return field_number(data, field)
 
 
-def _int(entry: dict[str, Any], field: str) -> int | None:
-    value = _number(entry, field)
-    return None if value is None else round(value)
+def _int(data: dict[str, Any], field: str) -> int | None:
+    value = field_number(data, field)
+    return None if value is None else int(round(value))
 
 
 def _when(entry: dict[str, Any]) -> Any:

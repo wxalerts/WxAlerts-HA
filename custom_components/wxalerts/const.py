@@ -175,6 +175,28 @@ CONDITION_CODES: tuple[str, ...] = (
     "funnel_cloud",
     "tornado",
 )
+# Decimal places kept for each numeric field, in native units, for sensors,
+# the weather entity and forecast entries alike. 0 means a whole number.
+FIELD_DIGITS: dict[str, int] = {
+    "temperature_c": 1,
+    "dewpoint_c": 1,
+    "feels_like_c": 1,
+    "apparent_temperature_c": 1,
+    "temp_high_c": 1,
+    "temp_low_c": 1,
+    "relative_humidity": 0,
+    "humidity": 0,
+    "wind_speed_kmh": 1,
+    "wind_gust_kmh": 1,
+    "wind_direction_deg": 0,
+    "pressure_hpa": 1,
+    "visibility_km": 1,
+    "precip_last_hour_mm": 1,
+    "precip_mm": 1,
+    "uv_index": 0,
+    "precip_probability": 0,
+    "cloud_cover": 0,
+}
 # An observation older than this makes the conditions entities unavailable.
 CONDITIONS_STALE_SECONDS = 7200
 
