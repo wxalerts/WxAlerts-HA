@@ -66,6 +66,7 @@ from .const import (
     SIGNAL_FORECAST_UPDATED,
     SIGNAL_TICK,
     COND_CONDITION_CODE,
+    COND_IS_DAY,
     COND_DEWPOINT_C,
     COND_FEELS_LIKE_C,
     COND_HUMIDITY,
@@ -83,9 +84,15 @@ from .entity import WxAlertsConditionsEntity, WxAlertsPlaceEntity
 # condition is the same either way.
 _CLEAR = "clear"
 
-# Stable condition codes to Home Assistant conditions. Covers plain names and
-# the NWS observation icon codes, since observations are NWS sourced; a Home
-# Assistant condition name passes through as itself.
+# Stable condition codes to Home Assistant conditions. The server's own set
+# (const.CONDITION_CODES) comes first and every code in it is mapped; NWS icon
+# codes and Home Assistant's condition names are accepted too, for tolerance.
+#
+# Judgement calls: haze, smoke and dust read as fog, because each is a
+# visibility obstruction and "exceptional" would make an ordinary hazy summer
+# afternoon look like an emergency on the card. Showers read as rainy and only
+# heavy_rain as pouring. A squall is windy-variant. Funnel clouds and
+# tornadoes are exceptional.
 CONDITION_MAP: dict[str, str] = {
     # Sky
     "clear": _CLEAR,
@@ -103,6 +110,7 @@ CONDITION_MAP: dict[str, str] = {
     "overcast": ATTR_CONDITION_CLOUDY,
     "ovc": ATTR_CONDITION_CLOUDY,
     # Wind
+    "squall": ATTR_CONDITION_WINDY_VARIANT,
     "wind_skc": ATTR_CONDITION_WINDY,
     "wind_few": ATTR_CONDITION_WINDY,
     "wind_sct": ATTR_CONDITION_WINDY_VARIANT,
@@ -377,7 +385,10 @@ class PlaceWeather(WxAlertsConditionsEntity, WeatherEntity):
 
     @property
     def condition(self) -> str | None:
-        return map_condition(self._obs.get(COND_CONDITION_CODE), is_up(self.hass))
+        # The observation says whether it was day; the sun is the fallback.
+        is_day = self._obs.get(COND_IS_DAY)
+        daytime = is_day if isinstance(is_day, bool) else is_up(self.hass)
+        return map_condition(self._obs.get(COND_CONDITION_CODE), daytime)
 
     @property
     def native_temperature(self) -> float | None:

@@ -144,6 +144,37 @@ COND_CONDITION = "condition"
 COND_CONDITION_CODE = "condition_code"
 COND_FEELS_LIKE_C = "feels_like_c"
 COND_PRECIP_LAST_HOUR_MM = "precip_last_hour_mm"
+COND_PLACE_ID = "place_id"
+COND_PLACE_NAME = "place_name"
+# True by day; decides sunny or clear-night for a "clear" observation.
+COND_IS_DAY = "is_day"
+# The server's stable condition codes (API constant CONDITION_CODES), shared by
+# conditions and forecasts. weather.CONDITION_MAP maps every one.
+CONDITION_CODES: tuple[str, ...] = (
+    "clear",
+    "clear_night",
+    "partly_cloudy",
+    "cloudy",
+    "overcast",
+    "fog",
+    "haze",
+    "smoke",
+    "dust",
+    "drizzle",
+    "rain",
+    "heavy_rain",
+    "showers",
+    "freezing_rain",
+    "sleet",
+    "snow",
+    "heavy_snow",
+    "rain_snow",
+    "hail",
+    "thunderstorm",
+    "squall",
+    "funnel_cloud",
+    "tornado",
+)
 # An observation older than this makes the conditions entities unavailable.
 CONDITIONS_STALE_SECONDS = 7200
 

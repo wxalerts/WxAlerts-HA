@@ -60,6 +60,10 @@ sign in to wxalerts.org. See *Upgrading from 0.x* in the README.
   with finished hours and past days dropped as the clock moves. Clear reads
   sunny or clear-night by each hour's `is_daytime`. The forecast and current
   conditions work independently.
+- Every server condition code maps to a Home Assistant condition (haze,
+  smoke and dust read as fog; squall as windy-variant; funnel cloud and
+  tornado as exceptional). A clear observation uses its own `is_day`, falling
+  back to the sun.
 - **Feed age.** An account-wide *Feed age* sensor from the server's status
   heartbeat, and a *Connected* sensor. Storm cell entities go unavailable when
   the heartbeat is 15 minutes old or reports offline. A 30 second timer keeps

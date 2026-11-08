@@ -257,6 +257,9 @@ def conditions(age_seconds: float = 300.0, **overrides) -> dict:
         "condition_code": "rain",
         "feels_like_c": 25.6,
         "precip_last_hour_mm": 1.3,
+        "place_id": 101,
+        "place_name": "Home",
+        "is_day": True,
         **overrides,
     }
 

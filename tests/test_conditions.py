@@ -71,14 +71,29 @@ async def test_the_weather_entity_reports_current_conditions(hass, setup_integra
     assert state.attributes["observed_at"].endswith("Z")
 
 
+@pytest.mark.parametrize(("is_day", "expected"), [(True, "sunny"), (False, "clear-night")])
+async def test_a_clear_sky_follows_is_day(hass, setup_integration, is_day, expected):
+    # The sun says the opposite; the observation's own is_day wins.
+    with patch("custom_components.wxalerts.weather.is_up", return_value=not is_day):
+        await feed(
+            hass,
+            setup_integration,
+            conditions_topic(101),
+            encode(conditions(condition_code="clear", condition="Clear", is_day=is_day)),
+        )
+        assert hass.states.get(WEATHER).state == expected
+
+
 @pytest.mark.parametrize(("daytime", "expected"), [(True, "sunny"), (False, "clear-night")])
-async def test_a_clear_sky_follows_the_sun(hass, setup_integration, daytime, expected):
+async def test_without_is_day_a_clear_sky_follows_the_sun(
+    hass, setup_integration, daytime, expected
+):
     with patch("custom_components.wxalerts.weather.is_up", return_value=daytime):
         await feed(
             hass,
             setup_integration,
             conditions_topic(101),
-            encode(conditions(condition_code="clear", condition="Clear")),
+            encode(conditions(condition_code="clear", condition="Clear", is_day=None)),
         )
         assert hass.states.get(WEATHER).state == expected
 
@@ -159,3 +174,49 @@ async def test_an_undecodable_observation_is_ignored(hass, setup_integration):
 )
 def test_map_condition(code, daytime, expected):
     assert map_condition(code, daytime) == expected
+
+
+EXPECTED_SERVER_CODES = {
+    "clear": ("sunny", "clear-night"),
+    "clear_night": ("clear-night", "clear-night"),
+    "partly_cloudy": ("partlycloudy", "partlycloudy"),
+    "cloudy": ("cloudy", "cloudy"),
+    "overcast": ("cloudy", "cloudy"),
+    "fog": ("fog", "fog"),
+    "haze": ("fog", "fog"),
+    "smoke": ("fog", "fog"),
+    "dust": ("fog", "fog"),
+    "drizzle": ("rainy", "rainy"),
+    "rain": ("rainy", "rainy"),
+    "heavy_rain": ("pouring", "pouring"),
+    "showers": ("rainy", "rainy"),
+    "freezing_rain": ("snowy-rainy", "snowy-rainy"),
+    "sleet": ("snowy-rainy", "snowy-rainy"),
+    "snow": ("snowy", "snowy"),
+    "heavy_snow": ("snowy", "snowy"),
+    "rain_snow": ("snowy-rainy", "snowy-rainy"),
+    "hail": ("hail", "hail"),
+    "thunderstorm": ("lightning-rainy", "lightning-rainy"),
+    "squall": ("windy-variant", "windy-variant"),
+    "funnel_cloud": ("exceptional", "exceptional"),
+    "tornado": ("exceptional", "exceptional"),
+}
+
+
+def test_every_server_condition_code_maps_to_a_home_assistant_condition():
+    from homeassistant.components import weather
+
+    from custom_components.wxalerts.const import CONDITION_CODES
+
+    valid = {
+        value
+        for name, value in vars(weather).items()
+        if name.startswith("ATTR_CONDITION_") and name != "ATTR_CONDITION_CLASS"
+    }
+
+    assert set(CONDITION_CODES) == set(EXPECTED_SERVER_CODES)
+    for code in CONDITION_CODES:
+        day, night = EXPECTED_SERVER_CODES[code]
+        assert map_condition(code, True) == day, code
+        assert map_condition(code, False) == night, code
+        assert {day, night} <= valid, code

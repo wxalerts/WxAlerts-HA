@@ -128,6 +128,14 @@ Current conditions, from the observing station nearest the place:
 - `sensor.wxalerts_home_condition`: the observed weather in words, with the
   stable `condition_code` as an attribute.
 
+Condition codes map to Home Assistant conditions as follows: clear is sunny
+by day and clear-night by night; partly cloudy is partlycloudy; cloudy and
+overcast are cloudy; fog, haze, smoke and dust are fog; drizzle, rain and
+showers are rainy; heavy rain is pouring; freezing rain, sleet and rain with
+snow are snowy-rainy; snow and heavy snow are snowy; hail is hail;
+thunderstorm is lightning-rainy; squall is windy-variant; funnel cloud and
+tornado are exceptional.
+
 These are unavailable when the latest observation is more than two hours old
 or missing, and a reading the station did not report is unknown.
 
