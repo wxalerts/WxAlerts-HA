@@ -336,5 +336,19 @@
       "storm_cell_open": "Storm cell approaching",
       "storm_cell_escalate": "Storm cell threat escalates"
     }
+  },
+  "issues": {
+    "instance_revoked": {
+      "title": "This Home Assistant was removed from your WxAlerts account",
+      "description": "It was revoked on wxalerts.org, so WxAlerts stopped. To add it back, open the WxAlerts re-authenticate prompt and sign in. If you meant to remove it, delete the WxAlerts integration."
+    },
+    "instance_over_limit": {
+      "title": "WxAlerts: more Home Assistant instances than your plan includes",
+      "description": "This instance was paused because your plan's Home Assistant slots are full. Revoke another instance on wxalerts.org under Account, Home Assistant, or add a Top-up pack for one more: {pricing_url}. WxAlerts resumes on its own once a slot is free."
+    },
+    "instance_plan_lapsed": {
+      "title": "WxAlerts: Supporter plan ended",
+      "description": "Home Assistant needs the Supporter plan on your WxAlerts account. Renew at {pricing_url}. WxAlerts resumes on its own once the plan is active."
+    }
   }
 }

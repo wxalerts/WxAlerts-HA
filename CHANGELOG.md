@@ -19,6 +19,14 @@ sign in to wxalerts.org. See *Upgrading from 0.x* in the README.
 - **Self-healing login.** If the broker rejects the login, the integration
   refreshes the sign-in and registers again for a fresh one, and only asks
   you to sign in when that fails.
+- **Heartbeat.** At start-up and every six hours the instance reports in to
+  wxalerts.org with its name; this is the website's "last seen".
+- **Revoking sticks.** Before any automatic re-registration the integration
+  checks the instance's standing. A revoked instance is never signed back up:
+  it shows a repair, "This Home Assistant was removed from your WxAlerts
+  account", and a re-authenticate prompt so you decide. An instance over the
+  plan's limit or on a lapsed plan shows a repair with the pricing link and
+  resumes on its own once it is covered again.
 - **Places from the account.** One device per place, read from the retained
   `wxalerts/u/<username>/places` topic. Places added, renamed, moved or
   deleted on wxalerts.org follow live, with no restart; a deleted place takes

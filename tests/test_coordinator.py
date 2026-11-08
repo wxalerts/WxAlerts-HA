@@ -16,6 +16,7 @@ from pytest_homeassistant_custom_component.common import async_capture_events
 from homeassistant.const import CONF_PASSWORD
 
 from custom_components.wxalerts.const import (
+    API_HEARTBEAT_URL_FMT,
     API_INSTANCES_URL,
     DOMAIN,
     OAUTH_TOKEN_URL,
@@ -33,6 +34,7 @@ from custom_components.wxalerts.coordinator import (
 from .conftest import feed, make_entry, make_token, start
 from .const import (
     ACCESS_TOKEN,
+    INSTANCE_ID,
     registration,
     CACHED_PLACES,
     HEAT_ALERT,
@@ -462,6 +464,25 @@ def _flows(hass):
     ]
 
 
+HEARTBEAT_URL = API_HEARTBEAT_URL_FMT.format(instance_id=INSTANCE_ID)
+
+
+def mock_heartbeat(aioclient_mock, active=True, reason=None, status=200):
+    aioclient_mock.post(
+        HEARTBEAT_URL,
+        status=status,
+        json={
+            "instance_id": INSTANCE_ID,
+            "name": "Home",
+            "username": "ha-k7x2q9mfw3",
+            "created_at": "2026-11-01T12:00:00+00:00",
+            "last_seen_at": "2026-11-08T12:00:00+00:00",
+            "active": active,
+            "deactivated_reason": reason,
+        },
+    )
+
+
 async def _reject_login(hass, coordinator):
     coordinator._handle_auth_failed()
     await hass.async_block_till_done()
@@ -474,13 +495,14 @@ async def test_a_rejected_login_is_renewed_without_asking(
     token, reconnect with the new login, and never bother the person."""
     entry = make_entry()
     coordinator = await start(hass, entry)
+    mock_heartbeat(aioclient_mock)
     aioclient_mock.post(API_INSTANCES_URL, json=registration(password="renewed"))
 
     await _reject_login(hass, coordinator)
 
     assert entry.data[CONF_PASSWORD] == "renewed"
     assert _flows(hass) == []
-    assert aioclient_mock.mock_calls[0][3]["Authorization"] == f"Bearer {ACCESS_TOKEN}"
+    assert aioclient_mock.mock_calls[1][3]["Authorization"] == f"Bearer {ACCESS_TOKEN}"
     # Reloaded onto the new login.
     assert entry.runtime_data is not coordinator
     assert mock_feed_client.call_args[0][0].password == "renewed"
@@ -491,6 +513,7 @@ async def test_an_expired_token_is_refreshed_before_registering(
 ):
     entry = make_entry(token=make_token(expires_in=-60))
     coordinator = await start(hass, entry)
+    mock_heartbeat(aioclient_mock)
     aioclient_mock.post(
         OAUTH_TOKEN_URL,
         json={"access_token": "refreshed", "refresh_token": "r2", "expires_in": 3600},
@@ -500,7 +523,7 @@ async def test_an_expired_token_is_refreshed_before_registering(
     await _reject_login(hass, coordinator)
 
     assert entry.data["token"]["access_token"] == "refreshed"
-    assert aioclient_mock.mock_calls[1][3]["Authorization"] == "Bearer refreshed"
+    assert aioclient_mock.mock_calls[-1][3]["Authorization"] == "Bearer refreshed"
     assert entry.data[CONF_PASSWORD] == "renewed"
 
 
@@ -509,6 +532,7 @@ async def test_a_refused_token_gets_one_forced_refresh(
 ):
     entry = make_entry()
     coordinator = await start(hass, entry)
+    mock_heartbeat(aioclient_mock)
     aioclient_mock.post(
         OAUTH_TOKEN_URL,
         json={"access_token": "refreshed", "refresh_token": "r2", "expires_in": 3600},
@@ -548,6 +572,7 @@ async def test_when_renewal_fails_it_asks_to_sign_in(
     expires = -60 if token_status else 3600
     entry = make_entry(token=make_token(expires_in=expires))
     coordinator = await start(hass, entry)
+    mock_heartbeat(aioclient_mock)
     if token_status:
         aioclient_mock.post(OAUTH_TOKEN_URL, status=token_status, json={"error": "invalid_grant"})
     else:
@@ -568,13 +593,15 @@ async def test_an_unreachable_api_retries_later_instead_of_asking(
 
     entry = make_entry()
     coordinator = await start(hass, entry)
+    mock_heartbeat(aioclient_mock)
     aioclient_mock.post(API_INSTANCES_URL, status=503)
 
     await _reject_login(hass, coordinator)
     assert _flows(hass) == []
-    assert aioclient_mock.call_count == 1
+    assert aioclient_mock.call_count == 2
 
     aioclient_mock.clear_requests()
+    mock_heartbeat(aioclient_mock)
     aioclient_mock.post(API_INSTANCES_URL, json=registration(password="renewed"))
     freezer.tick(timedelta(seconds=301))
     async_fire_time_changed(hass, dt_util.utcnow())
@@ -588,6 +615,7 @@ async def test_a_fresh_login_rejected_again_asks_instead_of_looping(
 ):
     entry = make_entry()
     await start(hass, entry)
+    mock_heartbeat(aioclient_mock)
     aioclient_mock.post(API_INSTANCES_URL, json=registration(password="renewed"))
     await _reject_login(hass, entry.runtime_data)
     assert _flows(hass) == []
@@ -595,7 +623,146 @@ async def test_a_fresh_login_rejected_again_asks_instead_of_looping(
     await _reject_login(hass, entry.runtime_data)
 
     assert _flows(hass) == [SOURCE_REAUTH]
+    assert aioclient_mock.call_count == 2
+
+
+async def test_a_revoked_instance_is_never_re_registered(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations
+):
+    """Revoke must stick: the broker rejecting a revoked login must not lead
+    to the integration quietly signing itself back up."""
+    from homeassistant.helpers import issue_registry as ir
+
+    entry = make_entry()
+    coordinator = await start(hass, entry)
+    mock_heartbeat(aioclient_mock, active=False, reason="revoked")
+    aioclient_mock.post(API_INSTANCES_URL, json=registration(password="renewed"))
+
+    await _reject_login(hass, coordinator)
+
+    assert all(str(call[1]) != API_INSTANCES_URL for call in aioclient_mock.mock_calls)
+    assert entry.data[CONF_PASSWORD] != "renewed"
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, "instance_revoked")
+    assert issue is not None
+    assert issue.severity is ir.IssueSeverity.ERROR
+    assert _flows(hass) == [SOURCE_REAUTH]
+
+
+async def test_a_deleted_instance_counts_as_revoked(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations
+):
+    from homeassistant.helpers import issue_registry as ir
+
+    entry = make_entry()
+    coordinator = await start(hass, entry)
+    aioclient_mock.post(HEARTBEAT_URL, status=404, json={"detail": {"code": "not_found"}})
+
+    await _reject_login(hass, coordinator)
+
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "instance_revoked")
     assert aioclient_mock.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("reason", "issue_id"),
+    [("over_limit", "instance_over_limit"), ("plan_lapsed", "instance_plan_lapsed")],
+)
+async def test_an_instance_outside_the_plan_shows_the_upgrade_path(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations, reason, issue_id
+):
+    from homeassistant.helpers import issue_registry as ir
+
+    entry = make_entry()
+    coordinator = await start(hass, entry)
+    mock_heartbeat(aioclient_mock, active=False, reason=reason)
+
+    await _reject_login(hass, coordinator)
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
+    assert issue.translation_placeholders == {"pricing_url": "https://wxalerts.org/pricing/"}
+    assert issue.learn_more_url == "https://wxalerts.org/pricing/"
+    assert aioclient_mock.call_count == 1  # never re-registered
+    assert _flows(hass) == []
+    assert coordinator.deactivated_reason == reason
+
+
+async def test_the_heartbeat_reports_in_and_clears_old_issues(
+    hass, aioclient_mock, no_heartbeat, mock_feed_client, enable_custom_integrations
+):
+    from homeassistant.helpers import issue_registry as ir
+
+    entry = make_entry()
+    coordinator = await start(hass, entry)
+    no_heartbeat.assert_awaited()  # ran at setup
+    ir.async_create_issue(
+        hass, DOMAIN, "instance_plan_lapsed", is_fixable=False,
+        severity=ir.IssueSeverity.ERROR, translation_key="instance_plan_lapsed",
+    )
+    mock_heartbeat(aioclient_mock)
+
+    await no_heartbeat.original(coordinator)
+
+    call = aioclient_mock.mock_calls[0]
+    assert str(call[1]) == HEARTBEAT_URL
+    assert call[2] == {"name": hass.config.location_name}
+    assert call[3]["Authorization"] == f"Bearer {ACCESS_TOKEN}"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "instance_plan_lapsed") is None
+
+
+async def test_a_heartbeat_that_finds_a_revoke_raises_it(
+    hass, aioclient_mock, no_heartbeat, mock_feed_client, enable_custom_integrations
+):
+    from homeassistant.helpers import issue_registry as ir
+
+    coordinator = await start(hass, make_entry())
+    mock_heartbeat(aioclient_mock, active=False, reason="revoked")
+    await no_heartbeat.original(coordinator)
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "instance_revoked")
+    assert _flows(hass) == [SOURCE_REAUTH]
+
+
+async def test_reactivation_is_noticed_by_the_heartbeat(
+    hass, aioclient_mock, no_heartbeat, mock_feed_client, enable_custom_integrations
+):
+    """Over the limit, then a slot is freed: the next heartbeat says active,
+    and the integration fetches a login and reconnects on its own."""
+    entry = make_entry()
+    coordinator = await start(hass, entry)
+    coordinator._handle_connection(False)
+    coordinator.deactivated_reason = "over_limit"
+    mock_heartbeat(aioclient_mock)
+    aioclient_mock.post(API_INSTANCES_URL, json=registration(password="renewed"))
+
+    await no_heartbeat.original(coordinator)
+    await hass.async_block_till_done()
+
+    assert entry.data[CONF_PASSWORD] == "renewed"
+
+
+async def test_a_failed_heartbeat_is_quiet(
+    hass, aioclient_mock, no_heartbeat, mock_feed_client, enable_custom_integrations
+):
+    coordinator = await start(hass, make_entry())
+    aioclient_mock.post(HEARTBEAT_URL, status=503)
+    await no_heartbeat.original(coordinator)
+    assert _flows(hass) == []
+
+
+async def test_the_heartbeat_repeats_every_six_hours(
+    hass, freezer, no_heartbeat, mock_feed_client, enable_custom_integrations
+):
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    await start(hass, make_entry())
+    before = no_heartbeat.await_count
+    freezer.tick(timedelta(hours=6, seconds=1))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert no_heartbeat.await_count == before + 1
 
 
 async def test_connection_state_reaches_the_entities(hass, setup_integration):

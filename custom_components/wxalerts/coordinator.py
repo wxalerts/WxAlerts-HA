@@ -27,6 +27,7 @@ from aiomqtt.exceptions import MqttConnectError
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
@@ -52,6 +53,13 @@ from .const import (
     PLACE_LON,
     PLACE_NAME,
     PLACE_SAME,
+    PRICING_URL,
+    REASON_OVER_LIMIT,
+    REASON_PLAN_LAPSED,
+    ISSUE_OVER_LIMIT,
+    ISSUE_PLAN_LAPSED,
+    ISSUE_REVOKED,
+    HEARTBEAT_SECONDS,
     RELOGIN_COOLDOWN_SECONDS,
     RELOGIN_RETRY_SECONDS,
     RUNG_OPTIONS,
@@ -481,6 +489,9 @@ class WxAlertsCoordinator:
         self._place_listeners: list[Callable[[list[Place]], None]] = []
         self._client: FeedClient | None = None
         self._unsub_tick: Callable[[], None] | None = None
+        self._unsub_heartbeat: Callable[[], None] | None = None
+        # Set when the account reports this instance inactive.
+        self.deactivated_reason: str | None = None
 
     # ===========================================================================
     # Lifecycle
@@ -551,8 +562,17 @@ class WxAlertsCoordinator:
         )
         self._client.start()
         self._schedule_same_lookups()
+        self._unsub_heartbeat = async_track_time_interval(
+            self.hass, self._async_heartbeat, timedelta(seconds=HEARTBEAT_SECONDS)
+        )
+        self.entry.async_create_background_task(
+            self.hass, self._async_heartbeat(), "wxalerts_heartbeat"
+        )
 
     async def async_stop(self) -> None:
+        if self._unsub_heartbeat:
+            self._unsub_heartbeat()
+            self._unsub_heartbeat = None
         if self._unsub_tick:
             self._unsub_tick()
             self._unsub_tick = None
@@ -598,6 +618,7 @@ class WxAlertsCoordinator:
         from .api import (
             ApiAuthError,
             ApiUnavailable,
+            InstanceDeactivated,
             InstanceLimit,
             SupporterRequired,
             async_refresh_login,
@@ -611,6 +632,9 @@ class WxAlertsCoordinator:
             return
         try:
             await async_refresh_login(self.hass, self.entry)
+        except InstanceDeactivated as err:
+            self._handle_deactivated(err.reason)
+            return
         except ApiUnavailable as err:
             _LOGGER.warning(
                 "Could not reach wxalerts.org to renew the broker login (%s); "
@@ -631,6 +655,68 @@ class WxAlertsCoordinator:
         self.hass.data[DOMAIN][self.entry.entry_id] = time.time()
         _LOGGER.info("Renewed the WxAlerts broker login; reconnecting")
         self.hass.config_entries.async_schedule_reload(self.entry.entry_id)
+
+    @callback
+    def _handle_deactivated(self, reason: str) -> None:
+        """The account says this instance is off. Never re-register over it.
+
+        A revoke is the person's decision, so it is reported and the sign-in
+        is offered, but nothing happens until they act. Over the plan's limit
+        or a lapsed plan is reported with the way to upgrade; the heartbeat
+        notices when the instance is active again.
+        """
+        self.deactivated_reason = reason
+        if reason in (REASON_OVER_LIMIT, REASON_PLAN_LAPSED):
+            issue = ISSUE_OVER_LIMIT if reason == REASON_OVER_LIMIT else ISSUE_PLAN_LAPSED
+            _LOGGER.warning(
+                "This Home Assistant is outside your WxAlerts plan (%s)", reason
+            )
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue,
+                is_fixable=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key=issue,
+                translation_placeholders={"pricing_url": PRICING_URL},
+                learn_more_url=PRICING_URL,
+            )
+            return
+        _LOGGER.warning("This Home Assistant was removed from your WxAlerts account")
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            ISSUE_REVOKED,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_REVOKED,
+        )
+        self.entry.async_start_reauth(self.hass)
+
+    async def _async_heartbeat(self, _now: Any = None) -> None:
+        """Tell the account this instance is alive, and read its standing.
+
+        Runs at setup and every few hours. It is the website's only "last
+        seen", and the way a revoke or a plan change reaches Home Assistant
+        when the broker has not said anything yet.
+        """
+        from .api import ApiError, InstanceDeactivated, async_send_heartbeat
+
+        try:
+            await async_send_heartbeat(self.hass, self.entry)
+        except InstanceDeactivated as err:
+            self._handle_deactivated(err.reason)
+            return
+        except ApiError as err:
+            _LOGGER.debug("WxAlerts heartbeat failed: %s", err)
+            return
+        for issue in (ISSUE_REVOKED, ISSUE_OVER_LIMIT, ISSUE_PLAN_LAPSED):
+            ir.async_delete_issue(self.hass, DOMAIN, issue)
+        if self.deactivated_reason is not None:
+            # Active again (upgraded, or a slot freed): fetch a login.
+            self.deactivated_reason = None
+            if not self.connected:
+                self._handle_auth_failed()
 
     @callback
     def _retry_recover(self, _now: Any) -> None:
@@ -1180,4 +1266,5 @@ class WxAlertsCoordinator:
             if self.feed_age is None
             else round(self.feed_age),
             "storms_available": self.storms_available,
+            "deactivated_reason": self.deactivated_reason,
         }

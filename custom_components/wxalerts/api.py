@@ -24,6 +24,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.instance_id import async_get as async_get_instance_id
 
 from .const import (
+    API_HEARTBEAT_URL_FMT,
     API_INSTANCES_URL,
     API_TIMEOUT_SECONDS,
     CONF_INSTANCE_ID,
@@ -34,6 +35,7 @@ from .const import (
     OAUTH_SCOPES,
     OAUTH_TOKEN_URL,
     PRICING_URL,
+    REASON_REVOKED,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -59,6 +61,14 @@ class InstanceLimit(ApiError):
         self.limit = limit
         self.used = used
         self.upgrade_url = upgrade_url or PRICING_URL
+
+
+class InstanceDeactivated(ApiError):
+    """The instance was revoked on the website or is outside the plan."""
+
+    def __init__(self, reason: str | None) -> None:
+        super().__init__(f"instance deactivated ({reason})")
+        self.reason = reason or REASON_REVOKED
 
 
 class ApiUnavailable(ApiError):
@@ -95,20 +105,13 @@ def async_register_oauth(hass: HomeAssistant) -> None:
     )
 
 
-async def async_register_instance(hass: HomeAssistant, access_token: str) -> dict[str, Any]:
-    """Register this Home Assistant instance and return its broker login.
-
-    The body names the instance by Home Assistant's own installation id and
-    location name, which is what the website lists it as.
-    """
-    body = {
-        "instance_id": await async_get_instance_id(hass),
-        "name": hass.config.location_name or "Home Assistant",
-    }
+async def _post(
+    hass: HomeAssistant, url: str, access_token: str, body: dict[str, Any]
+) -> tuple[int, dict[str, Any]]:
     session = async_get_clientsession(hass)
     try:
         async with session.post(
-            API_INSTANCES_URL,
+            url,
             json=body,
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=aiohttp.ClientTimeout(total=API_TIMEOUT_SECONDS),
@@ -117,26 +120,78 @@ async def async_register_instance(hass: HomeAssistant, access_token: str) -> dic
                 payload = await response.json(content_type=None)
             except ValueError:
                 payload = None
-            payload = payload if isinstance(payload, dict) else {}
-            status = response.status
+            return response.status, payload if isinstance(payload, dict) else {}
     except (aiohttp.ClientError, TimeoutError) as err:
         raise ApiUnavailable(str(err)) from err
 
-    if status in (HTTPStatus.OK, HTTPStatus.CREATED):
-        if not payload.get("username") or not payload.get("password"):
-            raise ApiUnavailable("registration returned no broker login")
-        return payload
+
+def _raise_for(status: int, payload: dict[str, Any]) -> None:
+    """Turn an error response into the exception the callers handle.
+
+    Errors arrive as ``{"detail": {code, message, upgrade_url}}``, with
+    ``limit`` and ``used`` added for 409.
+    """
     code = _error_code(payload)
+    detail = payload.get("detail") if isinstance(payload.get("detail"), dict) else payload
     if status == HTTPStatus.UNAUTHORIZED:
         raise ApiAuthError(code or "unauthorized")
     if status == HTTPStatus.FORBIDDEN and code == "supporter_required":
         raise SupporterRequired
     if status == HTTPStatus.CONFLICT and code == "instance_limit":
-        detail = payload.get("detail") if isinstance(payload.get("detail"), dict) else payload
         raise InstanceLimit(detail.get("limit"), detail.get("used"), detail.get("upgrade_url", ""))
     if status == HTTPStatus.FORBIDDEN:
         raise ApiAuthError(code or "forbidden")
     raise ApiUnavailable(f"HTTP {status} {code}".strip())
+
+
+async def _instance_body(hass: HomeAssistant) -> dict[str, Any]:
+    return {
+        "instance_id": await async_get_instance_id(hass),
+        "name": hass.config.location_name or "Home Assistant",
+    }
+
+
+async def async_register_instance(hass: HomeAssistant, access_token: str) -> dict[str, Any]:
+    """Register this Home Assistant instance and return its broker login.
+
+    The body names the instance by Home Assistant's own installation id and
+    location name, which is what the website lists it as. Registering the
+    same instance again returns the same username with a new password.
+    """
+    status, payload = await _post(
+        hass, API_INSTANCES_URL, access_token, await _instance_body(hass)
+    )
+    if status in (HTTPStatus.OK, HTTPStatus.CREATED):
+        if not payload.get("username") or not payload.get("password"):
+            raise ApiUnavailable("registration returned no broker login")
+        return payload
+    _raise_for(status, payload)
+    raise AssertionError("unreachable")
+
+
+async def async_heartbeat(
+    hass: HomeAssistant, access_token: str, instance_id: str
+) -> dict[str, Any]:
+    """Report this instance as alive and read back its standing.
+
+    This is the only source of "last seen" on the website. The response is
+    the instance entry, whose ``active`` and ``deactivated_reason`` say
+    whether the person revoked it or the plan no longer covers it.
+    """
+    body = await _instance_body(hass)
+    status, payload = await _post(
+        hass,
+        API_HEARTBEAT_URL_FMT.format(instance_id=instance_id),
+        access_token,
+        {"name": body["name"]},
+    )
+    if status == HTTPStatus.OK:
+        return payload
+    if status == HTTPStatus.NOT_FOUND:
+        # The instance no longer exists on the account: as final as a revoke.
+        return {"instance_id": instance_id, "active": False, "deactivated_reason": REASON_REVOKED}
+    _raise_for(status, payload)
+    raise AssertionError("unreachable")
 
 
 def _error_code(payload: dict[str, Any]) -> str:
@@ -161,12 +216,12 @@ def broker_data(registration: dict[str, Any], instance_id: str | None = None) ->
     }
 
 
-async def async_refresh_login(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Get a fresh broker login with the stored token, refreshing it as needed.
+async def _with_token(hass: HomeAssistant, entry: ConfigEntry, call):
+    """Run ``call(access_token)`` with a valid token.
 
-    Writes the new token and login into the entry. Raises ApiAuthError when
-    the token cannot be refreshed (sign in again), SupporterRequired or
-    InstanceLimit for plan problems, ApiUnavailable for network trouble.
+    The token is refreshed when it has expired, and once more if the API
+    refuses it anyway (revoked sessions, clock skew). Raises ApiAuthError when
+    no usable token can be had: the person has to sign in again.
     """
     if CONF_TOKEN not in entry.data:
         raise ApiAuthError("no token stored")
@@ -182,17 +237,40 @@ async def async_refresh_login(hass: HomeAssistant, entry: ConfigEntry) -> None:
         raise ApiUnavailable(str(err)) from err
     except (aiohttp.ClientError, TimeoutError) as err:
         raise ApiUnavailable(str(err)) from err
-
     try:
-        registration = await async_register_instance(
-            hass, entry.data[CONF_TOKEN]["access_token"]
-        )
+        return await call(entry.data[CONF_TOKEN]["access_token"])
     except ApiAuthError:
-        # A token can be refused before its stated expiry (revoked sessions,
-        # clock skew). One forced refresh, then give up.
         token = await _force_refresh(hass, entry, implementation)
-        registration = await async_register_instance(hass, token["access_token"])
+        return await call(token["access_token"])
 
+
+async def async_send_heartbeat(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
+    """Heartbeat with the entry's token. Raises InstanceDeactivated if the
+    instance is no longer active."""
+    instance_id = entry.data.get(CONF_INSTANCE_ID) or await async_get_instance_id(hass)
+    standing = await _with_token(
+        hass, entry, lambda token: async_heartbeat(hass, token, instance_id)
+    )
+    if standing.get("active") is False:
+        raise InstanceDeactivated(standing.get("deactivated_reason"))
+    return standing
+
+
+async def async_refresh_login(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Get a fresh broker login with the stored token, refreshing it as needed.
+
+    The heartbeat goes first, so a revoke sticks: an instance the person
+    removed on the website, or one outside the plan, raises
+    InstanceDeactivated and is never silently re-registered. Otherwise the
+    instance is registered again and the new login written into the entry.
+    Raises ApiAuthError when the token cannot be refreshed, SupporterRequired
+    or InstanceLimit for plan problems, ApiUnavailable for network trouble.
+    """
+    if entry.data.get(CONF_INSTANCE_ID):
+        await async_send_heartbeat(hass, entry)
+    registration = await _with_token(
+        hass, entry, lambda token: async_register_instance(hass, token)
+    )
     hass.config_entries.async_update_entry(
         entry, data={**entry.data, **broker_data(registration, entry.data.get(CONF_INSTANCE_ID))}
     )

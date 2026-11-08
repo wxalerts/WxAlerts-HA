@@ -20,6 +20,7 @@ from custom_components.wxalerts.const import (
 from custom_components.wxalerts.diagnostics import async_get_config_entry_diagnostics
 
 from .conftest import feed, make_entry
+from .test_coordinator import mock_heartbeat
 from .const import (
     ACCESS_TOKEN,
     PASSWORD,
@@ -218,6 +219,7 @@ async def test_a_missing_broker_login_is_registered_at_setup(
     hass, aioclient_mock, mock_feed_client, enable_custom_integrations
 ):
     entry = make_entry(**{CONF_PASSWORD: ""})
+    mock_heartbeat(aioclient_mock)
     aioclient_mock.post(API_INSTANCES_URL, json=registration())
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -230,7 +232,7 @@ async def test_an_unreachable_api_at_setup_retries(
     hass, aioclient_mock, mock_feed_client, enable_custom_integrations
 ):
     entry = make_entry(**{CONF_PASSWORD: ""})
-    aioclient_mock.post(API_INSTANCES_URL, status=503)
+    mock_heartbeat(aioclient_mock, status=503)
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -282,3 +284,15 @@ async def test_diagnostics_redact_the_login_and_coordinates(
     assert state["counties"] == ["012113", "001001"]
     assert state["storms_per_place"]["101"][0]["rung"] == 40
     assert state["feed_online"] is True
+
+
+async def test_a_revoked_instance_is_not_re_registered_at_setup(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations
+):
+    entry = make_entry(**{CONF_PASSWORD: ""})
+    mock_heartbeat(aioclient_mock, active=False, reason="revoked")
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert all(str(call[1]) != API_INSTANCES_URL for call in aioclient_mock.mock_calls)

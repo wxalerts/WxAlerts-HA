@@ -64,6 +64,13 @@ Sign-in returns to Home Assistant through
   its own. A full quota shows a note in the setup dialog with the same
   choices: revoke one, or add a Top-up.
 - Setting the integration up again on the same Home Assistant reuses its slot.
+- **Revoking sticks.** An instance revoked on the website stops and shows a
+  repair: "This Home Assistant was removed from your WxAlerts account". It
+  never signs itself back up; to add it back, open the re-authenticate prompt
+  and sign in.
+- If a plan lapses or packs drop, the newest instances beyond the quota are
+  paused first. A paused instance shows a repair with the way to upgrade and
+  resumes on its own once it is covered again.
 
 ## Entities and events
 
@@ -271,10 +278,16 @@ Automations that pointed at 0.x entities need repointing: the new ids are
   pack for one more.
 - **Sign-in window never returns to Home Assistant**: My Home Assistant must
   be enabled, and its instance URL must point at this Home Assistant.
-- **Re-authenticate prompt after it was working**: the instance was revoked
-  on the website, the plan lapsed, or the sign-in expired. A rotated broker
-  password is renewed on its own; the prompt only appears when that is not
-  possible. Open it and sign in again.
+- **"This Home Assistant was removed from your WxAlerts account"**: it was
+  revoked on wxalerts.org. Open the re-authenticate prompt and sign in to add
+  it back, or delete the integration if that was the intent.
+- **"More Home Assistant instances than your plan includes" or "Supporter
+  plan ended"**: revoke another instance or add a Top-up pack, or renew the
+  plan. WxAlerts resumes on its own within six hours, or right away after a
+  restart.
+- **Re-authenticate prompt after it was working**: the sign-in expired or was
+  revoked. A rotated broker password is renewed on its own; the prompt only
+  appears when that is not possible. Open it and sign in again.
 - **No devices after setup**: the account has no saved places yet. Add one on
   wxalerts.org and it appears within seconds.
 - **Alert entities unavailable for a place**: the place has no US county
@@ -295,8 +308,14 @@ Automations that pointed at 0.x entities need repointing: the new ids are
 Signing in is OAuth2 with PKCE against the wxalerts.org identity provider.
 With that sign-in the integration registers this Home Assistant instance at
 `api.wxalerts.org` and receives a broker login for it alone. If the broker
-ever rejects that login, the integration refreshes the sign-in and registers
-again before asking you for anything.
+ever rejects that login, the integration first checks the instance's standing
+with the account: a revoked or paused instance is reported and left alone;
+otherwise it refreshes the sign-in and registers again for a fresh login
+before asking you for anything.
+
+At start-up and every six hours the integration sends a heartbeat with this
+Home Assistant's name. That is what the website shows as "last seen", and how
+a revoke or a plan change reaches Home Assistant.
 
 The feed is one MQTT v5 connection over websockets to
 `wss://mqtt.wxalerts.org/mqtt` (port 443), using that login. It subscribes to your

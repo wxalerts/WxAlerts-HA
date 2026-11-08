@@ -51,6 +51,19 @@ def no_same_lookup():
 
 
 @pytest.fixture(autouse=True)
+def no_heartbeat():
+    """Stub the account heartbeat out of every test by default; it runs at
+    setup and would otherwise need the API mocked everywhere. Yields the mock;
+    tests of the real call use ``no_heartbeat.original``."""
+    original = WxAlertsCoordinator._async_heartbeat
+    with patch.object(
+        WxAlertsCoordinator, "_async_heartbeat", new_callable=AsyncMock
+    ) as heartbeat:
+        heartbeat.original = original
+        yield heartbeat
+
+
+@pytest.fixture(autouse=True)
 def oauth_registered(hass):
     """Entries are set up with the sign-in implementation available, as
     async_setup_entry registers it in production."""

@@ -18,13 +18,13 @@ PRICING_URL = "https://wxalerts.org/pricing/"
 # ===========================================================================
 # Sign-in (authentik, OAuth2 authorization code with PKCE)
 # ===========================================================================
-# Public client: no secret, so it is safe to compile in. Replace the
-# placeholder with the id the authentik application reports.
+# Public client: no secret, so it is safe to compile in. Issued by the
+# authentik application "wxalerts-home-assistant".
 HA_OAUTH_CLIENT_ID = "5094664ecabab38b86e8c7153b821f07e994096b"
 # authentik serves one authorize and one token endpoint for every
 # application; the per-application issuer is
-# https://auth.wxalerts.org/application/o/<slug>/. Confirmed against the
-# wx-alerts-mobile issuer's .well-known/openid-configuration.
+# https://auth.wxalerts.org/application/o/<slug>/. Confirmed against
+# .well-known/openid-configuration of the wxalerts-home-assistant issuer.
 OAUTH_ISSUER_BASE = "https://auth.wxalerts.org/application/o/"
 OAUTH_AUTHORIZE_URL = f"{OAUTH_ISSUER_BASE}authorize/"
 OAUTH_TOKEN_URL = f"{OAUTH_ISSUER_BASE}token/"
@@ -33,7 +33,18 @@ OAUTH_SCOPES = "openid profile email offline_access"
 # Account API: registers this instance and returns its broker login.
 API_BASE_URL = "https://api.wxalerts.org"
 API_INSTANCES_URL = f"{API_BASE_URL}/integrations/home-assistant/instances"
+API_HEARTBEAT_URL_FMT = f"{API_INSTANCES_URL}/{{instance_id}}/heartbeat"
 API_TIMEOUT_SECONDS = 20
+# The heartbeat is the website's only "last seen" for an instance.
+HEARTBEAT_SECONDS = 6 * 3600
+# deactivated_reason values on the instance entry.
+REASON_REVOKED = "revoked"
+REASON_OVER_LIMIT = "over_limit"
+REASON_PLAN_LAPSED = "plan_lapsed"
+# Repair issue ids.
+ISSUE_REVOKED = "instance_revoked"
+ISSUE_OVER_LIMIT = "instance_over_limit"
+ISSUE_PLAN_LAPSED = "instance_plan_lapsed"
 # A broker login refreshed this recently that is rejected again goes straight
 # to a new sign-in rather than looping on re-registration.
 RELOGIN_COOLDOWN_SECONDS = 600
