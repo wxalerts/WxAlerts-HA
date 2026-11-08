@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.0.0
+
+WxAlerts moves from Home Assistant zones to the places on your WxAlerts
+account, and from lightning to storm cell alerts. Home Assistant is now a
+Supporter feature with its own broker login.
+
+**Breaking.** Upgrading removes every 0.x entity and device and asks you to
+sign in. See *Upgrading from 0.x* in the README.
+
+- **Per-account login.** Setup asks for the Home Assistant username and
+  password created on wxalerts.org (Account, Home Assistant) and checks them by
+  connecting to `wss://mqtt.wxalerts.org/mqtt`. A bad login or a Free account
+  gets a short note that Home Assistant needs the Supporter plan, with a link
+  to pricing. A rotated, revoked or lapsed login starts a re-authenticate
+  prompt instead of retrying forever.
+- **Places from the account.** One device per place, read from the retained
+  `wxalerts/u/<username>/places` topic. Places added, renamed, moved or
+  deleted on wxalerts.org follow live, with no restart; a deleted place takes
+  its device with it. The last list is cached so entities exist at start-up.
+  A place without a county code gets one looked up from `api.weather.gov`.
+- **Alerts per place.** Active alert, highest severity, alert count, top alert,
+  per-type binary sensors, map markers, the `wxalerts_alert` and
+  `wxalerts_hazard` events and the device triggers all work per place. Two
+  places in one county are two devices. Events now carry `place_id` and
+  `place_name`.
+- **Storm cell alerts.** Per place: *Storm cell approaching* (safety), *Storm
+  cell ETA* (counts down between updates) and *Storm cell threat* (enum by
+  rung), the `wxalerts_storm_cell` event on open and escalate, and matching
+  device triggers. A storm that was never cleared expires after 30 minutes.
+- **Feed age.** An account-wide *Feed age* sensor from the server's status
+  heartbeat, and a *Connected* sensor. Storm cell entities go unavailable when
+  the heartbeat is 15 minutes old or reports offline. A 30 second timer keeps
+  time-based state moving with no messages arriving.
+- **Diagnostics** download, with the username, password and place coordinates
+  redacted.
+- **Removed:** GOES GLM lightning (every sensor, device, option, the history
+  backfill and person tracking), zone selection, and the alerts and lightning
+  toggles.
+- **Fixes:** the config entry is versioned and migrated (`async_migrate_entry`)
+  instead of claiming a migration that did not exist; platforms use
+  `AddConfigEntryEntitiesCallback`; the manifest declares
+  `single_config_entry`.
+- Requires Home Assistant 2025.2.0 or newer.
+
 ## 0.4.0
 
 Alerts become selectable by NWS event type instead of by phenomenon bucket.
@@ -8,7 +52,7 @@ Alerts become selectable by NWS event type instead of by phenomenon bucket.
 Thunderstorm, Flash Flood, Flood, Winter Storm, Heat) are gone, along with the
 `phenomenon_sensors` toggle that switched them on. They matched on the VTEC
 phenomenon alone, so a Tornado Watch and a Tornado Warning both turned on one
-`Tornado alert` sensor — a take-cover automation could not tell the two apart.
+`Tornado alert` sensor, a take-cover automation could not tell the two apart.
 Their registry entries are removed automatically on upgrade rather than left
 sitting as unavailable, so an automation still pointed at one breaks visibly
 now instead of silently never firing again. Repoint them at the new sensors.
@@ -16,8 +60,8 @@ now instead of silently never firing again. Repoint them at the new sensors.
 - **All 122 NWS event types are selectable**, in options, as binary sensors:
   `binary_sensor.wxalerts_home_tornado_warning`,
   `binary_sensor.wxalerts_home_blizzard_warning`, and so on. An upgraded entry
-  and a fresh install both start with the hazards that can kill someone asleep
-  — Tornado, Severe Thunderstorm, Flash Flood, Extreme Wind, Hurricane,
+  and a fresh install both start with the hazards that can kill someone asleep:
+  Tornado, Severe Thunderstorm, Flash Flood, Extreme Wind, Hurricane,
   Blizzard, Ice Storm, Snow Squall and Tsunami warnings.
 - **Device triggers for the whole catalogue, with no configuration.** Each
   county device offers every event type as a *begins* and an *ends* trigger in
@@ -31,12 +75,12 @@ now instead of silently never firing again. Repoint them at the new sensors.
   nothing; an *end* is never suppressed, because the set starts empty on a
   restart and cannot produce a spurious one.
 - **New `Top alert` sensor** per county: the most urgent hazard in effect, by
-  name. Ranking now breaks a severity tie on significance — NWS gives a Tornado
+  name. Ranking now breaks a severity tie on significance, NWS gives a Tornado
   Watch and a Severe Thunderstorm Warning the same severity, so severity alone
   ordered them by arrival.
 - **Names are canonical everywhere.** The two feed paths word the same hazard
-  differently — the VTEC path builds "Fire Weather Warning" where NWS says "Red
-  Flag Warning", "Marine Warning" where NWS says "Special Marine Warning" — so
+  differently, the VTEC path builds "Fire Weather Warning" where NWS says "Red
+  Flag Warning", "Marine Warning" where NWS says "Special Marine Warning", so
   matching resolves the VTEC pair first and falls back to the name only for
   CAP-only products, which have no VTEC and carry the canonical spelling
   already. Map markers and the alert list report the canonical name.
@@ -49,7 +93,7 @@ now instead of silently never firing again. Repoint them at the new sensors.
 Lightning becomes a proximity feed rather than a box counter.
 
 **Breaking.** The single `Lightning flashes` sensor per zone is replaced by a
-proximity set per target, on its own `Lightning — <name>` device: nearest
+proximity set per target, on its own "Lightning <name>" device: nearest
 strike, ring counts at 5/10/20/30 miles, strike rate, minutes since the last
 strike, a trend label, and a `Lightning within <n>mi` binary sensor with
 `device_class: safety`. The old entity has no successor and will show as
@@ -62,7 +106,7 @@ instead of being chosen by hand.
 
 - **The box was never centred on you.** Geohash cells are aligned to the globe,
   so the cell containing a location sits wherever the grid puts it. A station
-  4 miles from its cell's southern edge was blind to strikes past that edge —
+  4 miles from its cell's southern edge was blind to strikes past that edge -
   well inside the ten-mile ring, and typically the direction weather arrives
   from. Coverage is now the set of cells the radius actually reaches, and each
   flash is filtered by true great-circle distance rather than by cell
@@ -82,7 +126,7 @@ instead of being chosen by hand.
   so starting during a storm meant reporting calm and ramping up over the whole
   window. The integration now asks the feed's history endpoint once on connect.
   Where that endpoint is not routed it logs one line and fills from live
-  flashes — a slower ramp, never a setup failure.
+  flashes, a slower ramp, never a setup failure.
 - Trimming coverage to fit the broker's subscription cap is logged with what
   was dropped, because a dropped cell is a direction the sensor cannot see.
 
@@ -114,7 +158,7 @@ alert-per-zone scheme. Entities, configuration and event payloads from
 
 New:
 
-- Zones are resolved once at setup — county SAME code via `api.weather.gov`,
+- Zones are resolved once at setup, county SAME code via `api.weather.gov`,
   and a geohash box computed locally. Never polled afterwards.
 - GOES-19 GLM lightning: a flash counter per zone over a rolling window.
 - `geo_location` map markers per live hazard, carrying the alert polygon.

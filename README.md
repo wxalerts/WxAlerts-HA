@@ -5,263 +5,288 @@
 [![Validate](https://github.com/wxalerts/WxAlerts-HA/actions/workflows/validate.yml/badge.svg)](https://github.com/wxalerts/WxAlerts-HA/actions/workflows/validate.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Live **NWS weather alerts** and **GOES GLM lightning** from the
-[wxalerts.org](https://wxalerts.org) MQTT feed, mapped onto your Home
-Assistant zones. Push, not polling: alerts arrive the moment they are
-published and disappear the moment they end.
+Live **NWS alerts** and **storm cell alerts** for the places on your
+[wxalerts.org](https://wxalerts.org) account. Push, not polling: alerts
+arrive the moment they are published and clear the moment they end.
 
-> Requires Home Assistant **2024.12.0** or newer.
+Home Assistant is a **Supporter** feature. See
+[wxalerts.org/pricing](https://wxalerts.org/pricing/).
+
+> Requires Home Assistant **2025.2.0** or newer.
 
 ## What you get
 
-Pick one or more Home Assistant zones (Home, the cabin, grandma's house).
-Each zone is resolved once, during setup, to:
+Every place saved on your WxAlerts account becomes a device in Home
+Assistant, named `WxAlerts <place>`. Add, rename or delete a place on
+wxalerts.org and Home Assistant follows within seconds, with no restart.
 
-- its **county SAME code** (the same six-digit code a weather radio uses),
-  via a single call to `api.weather.gov` — never polled again afterward
-- the centre of a **lightning proximity ring**, from which the feed
-  subscription is derived locally
+Each place gets:
 
-Both feeds are optional toggles — run alerts only, lightning only, or both.
+- **NWS alerts** for its county: an active alert sensor, the highest
+  severity, a count with the full alert list, the top alert, and a binary
+  sensor for each alert type you pick.
+- **Storm cell alerts**: when a storm cell's forecast path threatens the
+  place, a safety sensor turns on with the cell's arrival time, threat rung,
+  probabilities, speed, bearing and distance.
+- **Device triggers** for every NWS alert type and for storm cell episodes,
+  ready in the automation editor with nothing to configure.
 
-### Alert types
+## Installation
 
-Automations key on the **event type** — `Tornado Warning`, `Tornado Watch`,
-`Blizzard Warning`, `Red Flag Warning` — not on a phenomenon bucket. The
-phenomenon and the significance together are what an NWS product means, and
-they are the difference between "conditions are favourable" and "take cover
-now".
+### 1. Create the Home Assistant login on wxalerts.org
 
-All 122 types are available two ways, and you do not have to choose one:
+1. Sign in at [wxalerts.org](https://wxalerts.org) with a Supporter account.
+2. Open **Account**, then **Home Assistant**, and create the login.
+3. Copy the username (it starts with `ha-`) and the password. The password
+   is shown once; you can rotate it there at any time.
 
-- **Device triggers**, with no setup at all. In the automation editor pick the
-  county device and the trigger list carries every type, as *begins* and
-  *ends*. Nothing is created in the entity registry.
-- **Binary sensors**, for the types you select in options. These are what a
-  dashboard card, a template, or a condition can read. A fresh install selects
-  the hazards that can kill someone asleep — Tornado, Severe Thunderstorm,
-  Flash Flood, Extreme Wind, Hurricane, Blizzard, Ice Storm, Snow Squall and
-  Tsunami warnings — and nothing else.
+### 2. Install with HACS
 
-The catalogue covers every type `api.weather.gov/alerts/types` publishes, plus
-VTEC codes NWS has retired but offices can still issue. Retired codes fold into
-their replacements, so an office still sending `WC.Y` lands on Cold Weather
-Advisory with everyone else, and a product this catalogue has never seen still
-appears in the alert list — it just cannot be picked in options until the
-catalogue learns it.
+1. In HACS, open the menu and choose **Custom repositories**.
+2. Add `https://github.com/wxalerts/WxAlerts-HA` with category
+   **Integration**.
+3. Install **WxAlerts** and restart Home Assistant.
 
-### Entities per county
+Manual install: copy `custom_components/wxalerts` into your
+`config/custom_components` folder and restart.
 
-| Entity | Description |
-|---|---|
-| `binary_sensor` — Active alert | On when any hazard is live. `device_class: safety`. |
-| `sensor` — Highest severity | `Extreme` / `Severe` / `Moderate` / `Minor` / `None`. |
-| `sensor` — Active alerts | Count, with the full alert list (event type, headline, instruction, times, geometry source) in attributes for Markdown cards, plus flat `events` and `event_types` lists. |
-| `sensor` — Top alert | The most urgent hazard in effect, by name — `Tornado Warning`, `Heat Advisory`, `None`. Ranked by severity, then by significance, so a warning outranks a watch that shares its severity. |
-| `binary_sensor` — per alert type | One per NWS event type you selected in options. `binary_sensor.wxalerts_home_tornado_warning` and the rest. |
-| `geo_location` — map markers | One marker per live hazard at its polygon centroid; the full GeoJSON polygon is an attribute. Markers vanish when the hazard ends. |
+### 3. Add the integration
 
-### Entities per lightning target
+**Settings**, **Devices & services**, **Add integration**, **WxAlerts**.
+Enter the username and password from step 1. The integration connects to
+`wss://mqtt.wxalerts.org/mqtt` to check them, then creates one device per
+place.
 
-A target is a zone, or — if you enable *Also track people* — any `person` with a
-GPS fix. Each gets its own `Lightning — <name>` device.
+A Free account sees a short note that Home Assistant needs the Supporter
+plan, with a link to upgrade.
 
-| Entity | Description |
-|---|---|
-| `binary_sensor` — Lightning within *n*mi | On when the closest flash is inside the seek-shelter distance (default 10 miles, the NWS *When Thunder Roars* figure). `device_class: safety`. This is the one to trigger on. |
-| `sensor` — Nearest strike | Miles to the closest flash in the window. Unknown, not the radius, when nothing has been seen. |
-| `sensor` — Strikes 5/10/20/30mi | Cumulative counts inside each ring. |
-| `sensor` — Strike rate | Flashes per minute inside the radius. Rate is the severe-weather signal — GLM cannot distinguish cloud-to-ground from intra-cloud, so a big energy number does not mean a dangerous strike. |
-| `sensor` — Since last strike | Minutes, for building an all-clear. |
-| `sensor` — Trend | Approaching / Receding / Steady / Unknown, from the first-versus-last nearest distance over several samples, so one distant flash cannot flip it. |
+## Entities and events
 
-#### Why a radius and not a box size
+Entity ids below are for a place named Home.
 
-The feed bins flashes into geohash cells, and those cells are aligned to the
-globe rather than to you. The cell containing a location sits wherever the grid
-puts it — one real station sits about 4 miles from its cell's southern edge, so
-subscribing to that cell alone left it blind to strikes 4–10 miles south, which
-is the direction its weather arrives from.
+### Per place
 
-So you give it a radius, and it works out which cells that radius reaches,
-subscribes to all of them, and measures every flash's true great-circle
-distance. Cell membership is never the answer to "how close is it".
+- `binary_sensor.wxalerts_home_storm_cell_approaching`: on while a storm cell
+  threatens the place. `device_class: safety`. Attributes: `storm_id`,
+  `episode`, `eta_min`, `rung`, `rung_label`, `threat`, `prob_severe`,
+  `prob_tor`, `prob_hail`, `prob_wind`, `speed_kmh`, `bearing_deg`,
+  `distance_km`, `updated_at`, `storm_count`, `feed_age_seconds`.
+- `sensor.wxalerts_home_storm_cell_eta`: minutes until the most threatening
+  cell arrives. Counts down between updates. Unknown with no storm.
+- `sensor.wxalerts_home_storm_cell_threat`: the threat rung as an enum:
+  `none`, `thunderstorm_risk`, `thunderstorm_detected`, `tornado_risk`,
+  `tornado_risk_high`, `tornado_detected`, `tornado_confirmed` (plus the
+  outlook and wind rungs if the server sends them).
+- `binary_sensor.wxalerts_home_active_alert`: on when any NWS alert is live
+  for the place's county. `device_class: safety`.
+- `sensor.wxalerts_home_highest_severity`: `Extreme`, `Severe`, `Moderate`,
+  `Minor` or `None`.
+- `sensor.wxalerts_home_active_alerts`: the count, with the full alert list
+  (event type, headline, instruction, times) in attributes for Markdown
+  cards.
+- `sensor.wxalerts_home_top_alert`: the most urgent alert by name, ranked by
+  severity and then by significance, so a warning outranks a watch.
+- `binary_sensor.wxalerts_home_tornado_warning` and one more per alert type
+  you select in the integration options. A fresh install selects the
+  warnings that can harm someone asleep: Tornado, Severe Thunderstorm, Flash
+  Flood, Extreme Wind, Hurricane, Blizzard, Ice Storm, Snow Squall and
+  Tsunami.
 
-#### Starting mid-storm
+When several storm cells threaten one place, the one with the highest rung
+drives these entities, and the soonest arrival breaks a tie.
 
-The flash feed is a stream of events with nothing retained, so an integration
-that starts during a storm sees an empty window and reports a calm sky while it
-fills. On the first connection it asks the feed's history endpoint for the
-window it is about to report on, so it starts populated instead of ramping from
-zero.
+A place with no county (offshore, outside the US) gets storm cells; its
+alert entities show as unavailable.
 
-That endpoint is not routed on every deployment. If it cannot be reached the
-integration logs one line and fills from live flashes instead — a slower ramp,
-never a setup failure.
+### Account wide (device `WxAlerts`)
 
-Set **Lightning history URL** if yours lives somewhere other than the feed host.
-Pointing it straight at the ingest on your own network is the simplest answer
-and needs no public route at all — for example
-`http://10.0.0.5:8091/flashes`.
+- `sensor.wxalerts_feed_age`: seconds since the WxAlerts server last
+  reported in. Keeps rising on its own if the server goes quiet.
+- `binary_sensor.wxalerts_connected`: the broker connection.
 
-#### When the feed goes quiet
+If the feed stops reporting for 15 minutes, or reports itself offline, the
+storm cell entities turn unavailable rather than claiming the sky is clear.
 
-Lightning entities report `unavailable`, never a calm-looking zero, when the
-feed goes stale — the integration watches the ingest's own retained heartbeat. A
-confident zero during an outage looks exactly like a quiet sky, and the outage
-is most likely when the storm is overhead.
+### Map markers
 
-The heartbeat carries the time it was written, and that matters more than it
-sounds: a retained message says nothing about its own age, so a frozen "last
-granule 18 s ago" from an ingest that died an hour ago would otherwise read as
-perfectly healthy.
-
-Trigger automations `from: "off"` rather than on any change to `on`, so a feed
-*recovering* (`unavailable` → `on`) does not read as news about the sky.
+`geo_location` entities, one per live alert with a shape, at the polygon's
+centre. The polygon itself is the `geometry` attribute. They vanish when the
+alert ends.
 
 ### Events
 
-Every **new** hazard fires a `wxalerts_alert` event on the Home Assistant
-bus with the county, event type, severity, headline, and instruction.
-Trigger automations on the event, not on state changes — the event
-preserves the difference between "a second tornado warning" and "the same
-one updated", which a state machine cannot.
+- `wxalerts_storm_cell`: a storm cell episode opened or escalated for a
+  place. Data: `episode` (`open` or `escalate`), `place_id`, `place_name`,
+  `storm_id`, `eta_min`, `rung`, `rung_label`, `threat`, the four
+  probabilities, `speed_kmh`, `bearing_deg`, `distance_km`, `issued_at`,
+  `updated_at`.
+- `wxalerts_alert`: a new NWS alert for a place. Data includes `place_id`,
+  `place_name`, `event`, `event_type`, `severity`, `headline`,
+  `instruction`, `onset`, `ends`.
+- `wxalerts_hazard`: an alert type began or ended for a place. Data:
+  `place_id`, `place_name`, `event_type`, `event`, `action` (`begin` or
+  `end`), `severity`, `headline`, `ends`.
 
-Hazards already in effect when the integration connects arrive as retained
-messages and fire **no** event: they populate every entity, but they are
-current state rather than news, and announcing them would re-notify you of
-every live warning each time Home Assistant restarts. The flip side is
-that a hazard issued during the first few seconds of a connection updates
-the sensors without firing an event.
+None of these fire for what is already in effect when Home Assistant starts
+or reconnects, so a restart never re-announces a warning.
+
+### Device triggers
+
+Pick a place device in the automation editor. Every NWS alert type is listed
+as *begins* and *ends*, plus **Storm cell approaching** and **Storm cell
+threat escalates**. Nothing is added to the entity registry for the types you
+did not select as sensors.
+
+## Automation examples
+
+### Storm cell approaching
 
 ```yaml
 automation:
-  - alias: Tornado warning announcement
+  - alias: "Storm cell heading for home"
     trigger:
       - platform: event
-        event_type: wxalerts_alert
+        event_type: wxalerts_storm_cell
         event_data:
-          event: Tornado Warning
+          place_name: Home
     action:
       - service: notify.mobile_app_phone
         data:
-          title: "{{ trigger.event.data.headline }}"
-          message: "{{ trigger.event.data.instruction }}"
+          title: "{{ trigger.event.data.rung_label }}"
+          message: >
+            A storm cell is about {{ trigger.event.data.eta_min | round(0) }}
+            minutes from {{ trigger.event.data.place_name }}, moving at
+            {{ trigger.event.data.speed_kmh | round(0) }} km/h.
+```
+
+Or on the sensor, which also covers a storm that was already approaching
+when Home Assistant started:
+
+```yaml
+automation:
+  - alias: "Close the garage when a storm cell approaches"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.wxalerts_home_storm_cell_approaching
+        from: "off"
+        to: "on"
+    action:
+      - service: cover.close_cover
+        target:
+          entity_id: cover.garage_door
+```
+
+Trigger `from: "off"`: a stale feed makes the sensor unavailable, and
+`unavailable` to `on` means the feed recovered, not that a new storm arrived.
+
+### Life-safety warnings
+
+```yaml
+automation:
+  - alias: "Tornado warning at home"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.wxalerts_home_tornado_warning
+        from: "off"
+        to: "on"
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Tornado Warning"
+          message: >
+            {{ state_attr('binary_sensor.wxalerts_home_tornado_warning',
+            'alerts')[0].instruction }}
           data:
             push:
               interruption-level: critical
+      - service: light.turn_on
+        target:
+          entity_id: light.hallway
+        data:
+          color_name: red
 ```
 
-A simpler automation keyed on the binary sensor:
-
-Or on the hazard type itself, which is what most automations want. A
-`wxalerts_hazard` event fires when a type **starts or stops** being in effect
-for a county — once, no matter how many products describe it, so two
-simultaneous tornado warnings do not announce a tornado twice:
+Every warning for any place, in one automation:
 
 ```yaml
 automation:
-  - alias: Take cover
-    trigger:
-      - platform: device
-        domain: wxalerts
-        device_id: <the county device>
-        type: tornado_warning_begin
-    action:
-      - service: notify.mobile_app_phone
-        data:
-          message: "{{ trigger.event.data.headline }}"
-```
-
-The same thing without the device picker, if you prefer YAML:
-
-```yaml
+  - alias: "Any warning for any place"
     trigger:
       - platform: event
         event_type: wxalerts_hazard
         event_data:
-          same: "012113"
-          event_type: tornado_warning
           action: begin
-```
-
-A simpler automation keyed on the binary sensor:
-
-```yaml
-automation:
-  - alias: Any alert light
-    trigger:
-      - platform: state
-        entity_id: binary_sensor.wxalerts_home_active_alert
-        to: "on"
+    condition:
+      - "{{ trigger.event.data.event_type.endswith('_warning') }}"
     action:
-      - service: light.turn_on
-        target: { entity_id: light.alert_beacon }
-        data: { color_name: red }
+      - service: notify.mobile_app_phone
+        data:
+          title: "{{ trigger.event.data.event }}"
+          message: "{{ trigger.event.data.place_name }}: {{ trigger.event.data.headline }}"
 ```
-
-## Installation
-
-### HACS (recommended)
-
-1. HACS → ⋮ → **Custom repositories**
-2. Add `https://github.com/wxalerts/WxAlerts-HA`, type **Integration**
-3. Install **WxAlerts**, restart Home Assistant
-4. Settings → Devices & Services → **Add Integration** → WxAlerts
-5. Pick your zones, toggle alerts/lightning, done
-
-### Manual
-
-Copy `custom_components/wxalerts/` into your config's
-`custom_components/` and restart.
 
 ## Options
 
-Settings → Devices & Services → WxAlerts → **Configure**:
+**Settings**, **Devices & services**, **WxAlerts**, **Configure**: pick the
+alert types that get a binary sensor on each place. Everything else stays
+available as a device trigger. Places are managed on wxalerts.org.
 
-- change the watched zones (they are re-resolved on save)
-- enable/disable NWS alerts and GLM lightning independently
-- **alert types to create sensors for** — searchable, all 122 of them; leave it
-  empty to run on device triggers alone
-- lightning radius (miles) and seek-shelter distance (miles)
-- lightning rolling window (minutes)
-- also track people with a GPS fix
-- lightning history URL, to fill the window on startup
+## Upgrading from 0.x
+
+1.0 is a breaking release.
+
+- **Places replace Home Assistant zones.** Save the places you care about on
+  wxalerts.org; they arrive as devices on their own.
+- **Lightning is removed** in favour of storm cell alerts. All lightning
+  sensors, the lightning devices, person tracking and the lightning options
+  are gone.
+- **A Supporter login replaces the shared public login.**
+
+What happens on upgrade:
+
+1. The entry is migrated and every 0.x entity and device (county, zone and
+   lightning) is removed from the registry, so nothing lingers as
+   unavailable.
+2. Your alert type selection is kept.
+3. Home Assistant shows a **re-authenticate** prompt for WxAlerts. Enter the
+   Home Assistant login from wxalerts.org (Account, Home Assistant) and your
+   places appear.
+
+Automations that pointed at 0.x entities need repointing: the new ids are
+`binary_sensor.wxalerts_<place>_...` per place. Automations on the
+`wxalerts_alert` and `wxalerts_hazard` events now get `place_id` and
+`place_name` instead of `location` and `zone`.
+
+## Troubleshooting
+
+- **"That login did not work"**: check the username and password under
+  Account, Home Assistant on wxalerts.org, or rotate the password there and
+  enter the new one. Home Assistant needs the Supporter plan.
+- **Re-authenticate prompt after it was working**: the password was rotated
+  or revoked, or the Supporter plan lapsed. Enter the current login.
+- **No devices after setup**: the account has no saved places yet. Add one on
+  wxalerts.org and it appears within seconds.
+- **Alert entities unavailable for a place**: the place has no US county
+  (offshore or outside the US). Storm cells still work.
+- **Storm cell entities unavailable**: check `sensor.wxalerts_feed_age` and
+  `binary_sensor.wxalerts_connected`. Unavailable means the feed has not
+  reported for 15 minutes or Home Assistant is offline, never that the sky
+  is clear.
+- **Some counties have no alerts**: the broker allows 20 subscriptions per
+  client, which covers 17 distinct counties. A warning in the log names how
+  many were left out.
+- **Diagnostics**: on the integration page, open the menu and choose
+  **Download diagnostics**. The username, password and place coordinates are
+  redacted.
 
 ## How it connects
 
-The integration holds **one** MQTT v5 connection over websockets to
-`wss://mqtt.wxalerts.org/mqtt` (port 443, public and read-only — the
-credential `wxalerts`/`wxalerts` is deliberately published, and the broker
-denies publish on every topic). It subscribes only to the counties and
-geohash boxes you configured — the retained alert set repopulates every
-entity immediately on startup or reconnect, with no polling and no
-"unknown" gap.
-
-Hazard endings arrive as MQTT tombstones (empty retained payloads), so an
-alert clears the moment the NWS cancels it or it runs out of time —
-`status` and tombstones are trusted over local clock arithmetic.
-
-### Running against your own broker
-
-If you already bridge the wxalerts topics into a local Mosquitto/EMQX
-(one upstream connection serving your whole house), the MQTT client in
-this integration is a single swappable object (`FeedClient` in
-`coordinator.py`) — a host/port override option is the planned path for a
-`local_push` deployment. Bridge stanza reference lives in the
-[wxalerts docs](https://wxalerts.org).
-
-## Notes and limits
-
-- Marine and offshore zones have no SAME code, so they never produce
-  county alerts. A coastal zone still gets lightning.
-- Non-US zones get lightning only (GOES-East field of view permitting).
-- The broker allows 20 subscriptions per client; roughly 9 counties plus
-  9 lightning boxes. The integration trims lightning boxes first and logs
-  a warning if you exceed it.
-- Alert geometry is simplified for the wire (~550 m tolerance on county
-  unions); `geometry_source` on each alert tells you whether the shape is
-  a tight storm polygon or a coarse county union.
+One MQTT v5 connection over websockets to `wss://mqtt.wxalerts.org/mqtt`
+(port 443), signed in with your Home Assistant login. It subscribes to your
+account's topics (`wxalerts/u/<username>/#`: places, storm cells and the
+feed status) and to the public alert tree of each county your places are in.
+Everything is retained, so every entity is correct the moment Home Assistant
+starts, with no polling.
 
 ## Development
 
@@ -269,40 +294,24 @@ this integration is a single swappable object (`FeedClient` in
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-test.txt
 .venv/bin/python -m pytest            # the full suite, no network
-.venv/bin/python -m pytest -m live    # against the production broker
+WXALERTS_HA_USERNAME=ha-... WXALERTS_HA_PASSWORD=... \
+  .venv/bin/python -m pytest -m live  # against the production broker
 ```
 
-The default run fakes the MQTT transport, so it is deterministic and
-offline. The `live` tests are deselected by default: they dial the real
-broker to check what a fake cannot — TLS, websockets, MQTT v5, and that
-live payloads are still shaped the way the entities assume. They are
-weather-dependent, so a county with nothing live skips rather than fails.
+The default run fakes the MQTT transport, so it is deterministic and offline.
+`FeedClient` in `coordinator.py` is the whole MQTT surface; every topic name
+and payload field lives in the topic contract block of `const.py`.
 
-`FeedClient` in `coordinator.py` is the whole MQTT surface. Everything
-above it is fed by `_handle_message(topic, payload)`, which is what the
-tests drive.
-
-Leave `custom_components/wxalerts/brand/icon.png` where it is. Home
-Assistant 2026.3 and later serve a custom integration's icon straight out
-of that folder through the brands proxy, and HACS validation fails without
-it. There is no PR to open against `home-assistant/brands` — that repo no
-longer accepts custom integrations.
-
-## Data source
-
-NOAA/NWS alerts and GOES-19 GLM lightning, redistributed by
-[WxAlerts.org](https://wxalerts.org) — a nonprofit open-source weather
-alerting platform. The feed is public NOAA data; do not rely on any single
-delivery path for life-safety decisions — a weather radio has no
-dependencies.
+Leave `custom_components/wxalerts/brand/icon.png` where it is. Home Assistant
+2026.3 and later serve a custom integration's icon straight out of that
+folder, and HACS validation fails without it.
 
 ## Contributing
 
 Issues and pull requests are welcome at
 [github.com/wxalerts/WxAlerts-HA](https://github.com/wxalerts/WxAlerts-HA).
-Please run the test suite before opening a PR; CI runs hassfest, HACS
-validation and the same tests.
+CI runs hassfest, HACS validation and the test suite.
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT. See [LICENSE](LICENSE).
