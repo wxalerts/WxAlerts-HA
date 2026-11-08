@@ -72,6 +72,7 @@ from .const import (
     SIGNAL_TICK,
     SIGNIFICANCE_ORDER,
     STATUS_ONLINE,
+    STATUS_REASON,
     STATUS_STALE_SECONDS,
     STATUS_UPDATED_AT,
     STORM_EPISODE,
@@ -449,6 +450,10 @@ class WxAlertsCoordinator:
         self.options_snapshot: dict[str, Any] = dict(entry.options)
 
         self.places: dict[str, Place] = parse_places(entry.data.get(CONF_PLACES)) or {}
+        # Places whose entities exist. An empty list from the server empties
+        # self.places but leaves the entities, so a place coming back must
+        # wake its entities rather than create a second set.
+        self._entity_places: set[str] = set(self.places)
         # True once the broker has delivered a places list this run, as
         # opposed to the cached copy from the last run.
         self.places_received = False
@@ -492,6 +497,8 @@ class WxAlertsCoordinator:
         self._unsub_heartbeat: Callable[[], None] | None = None
         # Set when the account reports this instance inactive.
         self.deactivated_reason: str | None = None
+        self._standing_task: asyncio.Task | None = None
+        self._empty_places_pending = False
 
     # ===========================================================================
     # Lifecycle
@@ -666,6 +673,9 @@ class WxAlertsCoordinator:
         notices when the instance is active again.
         """
         self.deactivated_reason = reason
+        self._empty_places_pending = False
+        # Devices stay; every entity reads unavailable until this changes.
+        self._refresh_entities()
         if reason in (REASON_OVER_LIMIT, REASON_PLAN_LAPSED):
             issue = ISSUE_OVER_LIMIT if reason == REASON_OVER_LIMIT else ISSUE_PLAN_LAPSED
             _LOGGER.warning(
@@ -693,6 +703,20 @@ class WxAlertsCoordinator:
         )
         self.entry.async_start_reauth(self.hass)
 
+    @callback
+    def async_check_standing(self) -> None:
+        """Run the heartbeat now, once at a time."""
+        if self._standing_task is not None and not self._standing_task.done():
+            return
+        self._standing_task = self.entry.async_create_background_task(
+            self.hass, self._async_heartbeat(), "wxalerts_standing"
+        )
+
+    def _refresh_entities(self) -> None:
+        async_dispatcher_send(
+            self.hass, f"{SIGNAL_CONNECTION}_{self.entry.entry_id}", self.connected
+        )
+
     async def _async_heartbeat(self, _now: Any = None) -> None:
         """Tell the account this instance is alive, and read its standing.
 
@@ -712,9 +736,17 @@ class WxAlertsCoordinator:
             return
         for issue in (ISSUE_REVOKED, ISSUE_OVER_LIMIT, ISSUE_PLAN_LAPSED):
             ir.async_delete_issue(self.hass, DOMAIN, issue)
+        if self._empty_places_pending:
+            # Active, so the person really has no places now. Entities go
+            # unavailable; the devices stay until a non-empty list arrives
+            # without them, or the person deletes them.
+            self._empty_places_pending = False
+            self.places = {}
+            self._refresh_entities()
         if self.deactivated_reason is not None:
             # Active again (upgraded, or a slot freed): fetch a login.
             self.deactivated_reason = None
+            self._refresh_entities()
             if not self.connected:
                 self._handle_auth_failed()
 
@@ -771,6 +803,17 @@ class WxAlertsCoordinator:
             _LOGGER.warning("Places payload is not a list; ignoring it")
             return
         self.places_received = True
+        if not places:
+            # The server publishes [] when it revokes or deactivates this
+            # instance, minutes before the session is cut. Taken literally it
+            # would delete every device with no explanation. Ask the account
+            # what happened first; devices only ever go when a non-empty list
+            # arrives without them.
+            _LOGGER.info("Empty places list; checking this instance's standing")
+            self._empty_places_pending = True
+            self.async_check_standing()
+            return
+        self._empty_places_pending = False
         self._apply_places(places)
 
     def _with_resolved_same(self, place: Place) -> Place:
@@ -787,24 +830,25 @@ class WxAlertsCoordinator:
         old = self.places
         old_same = set(self.same_codes)
 
-        added = [place for pid, place in new.items() if pid not in old]
+        added = [place for pid, place in new.items() if pid not in self._entity_places]
+        returned = [
+            place for pid, place in new.items()
+            if pid not in old and pid in self._entity_places
+        ]
         removed = [pid for pid in old if pid not in new]
-        changed = [place for pid, place in new.items() if pid in old and old[pid] != place]
+        changed = [
+            place for pid, place in new.items() if pid in old and old[pid] != place
+        ] + returned
         self.places = new
 
         device_registry = dr.async_get(self.hass)
         entry_id = self.entry.entry_id
         for place_id in removed:
             self._forget_place_storms(place_id)
-            device = device_registry.async_get_device(
-                identifiers={place_device_identifier(entry_id, place_id)}
-            )
-            if device is not None:
-                device_registry.async_update_device(
-                    device.id, remove_config_entry_id=entry_id
-                )
+        if new:
+            self._remove_stale_place_devices(set(new))
         for place in changed:
-            if old[place.id].name != place.name:
+            if place.id in old and old[place.id].name != place.name:
                 device = device_registry.async_get_device(
                     identifiers={place_device_identifier(entry_id, place.id)}
                 )
@@ -816,6 +860,7 @@ class WxAlertsCoordinator:
                 self.hass, f"{SIGNAL_PLACE_UPDATED}_{entry_id}_{place.id}"
             )
         if added:
+            self._entity_places.update(place.id for place in added)
             for listener in list(self._place_listeners):
                 listener(added)
 
@@ -842,6 +887,29 @@ class WxAlertsCoordinator:
             )
 
         self._schedule_same_lookups()
+
+    def _remove_stale_place_devices(self, keep: set[str]) -> None:
+        """Remove place devices this entry owns whose place is not in ``keep``.
+
+        Scans the registry rather than diffing against the previous list, so
+        a device left over from an empty list or an earlier run is caught as
+        well. Only called with a non-empty list.
+        """
+        device_registry = dr.async_get(self.hass)
+        entry_id = self.entry.entry_id
+        wanted = {place_device_identifier(entry_id, place_id) for place_id in keep}
+        prefix = f"{entry_id}_place_"
+        for device in dr.async_entries_for_config_entry(device_registry, entry_id):
+            ours = {
+                ident
+                for ident in device.identifiers
+                if ident[0] == DOMAIN and ident[1].startswith(prefix)
+            }
+            if ours and not ours & wanted:
+                device_registry.async_remove_device(device.id)
+                self._entity_places -= {
+                    ident[1][len(prefix):] for ident in ours
+                }
 
     def _schedule_same_lookups(self) -> None:
         for place in self.places.values():
@@ -907,6 +975,10 @@ class WxAlertsCoordinator:
             if not isinstance(status, dict):
                 return
             self._status_online = status.get(STATUS_ONLINE) is not False
+            if not self._status_online and status.get(STATUS_REASON):
+                # Sent right before the server cuts a revoked or deactivated
+                # session: find out now, not at the next heartbeat.
+                self.async_check_standing()
             # The heartbeat is retained, so its own timestamp is what tells a
             # live feed from a frozen message left by a server that died. A
             # clock running ahead of ours is clamped to now, never negative.
@@ -933,7 +1005,7 @@ class WxAlertsCoordinator:
         A stale or offline feed reports unavailable rather than "no storm".
         A confident "off" during an outage looks exactly like calm weather.
         """
-        if not self.connected:
+        if not self.connected or self.deactivated_reason is not None:
             return False
         if self._status_online is False:
             return False

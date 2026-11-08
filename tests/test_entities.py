@@ -267,6 +267,102 @@ async def test_a_place_that_moves_county_follows_its_new_county(
     assert hass.states.get(SEVERITY).state == "Moderate"
 
 
+async def test_an_empty_places_list_keeps_every_device_and_checks_standing(
+    hass, config_entry, no_heartbeat, setup_integration
+):
+    """The server sends [] on revoke. Deleting everything on that alone left
+    the owner with no devices and no explanation."""
+    calls = no_heartbeat.await_count
+    await feed(hass, setup_integration, TOPIC_PLACES, encode([]))
+
+    assert no_heartbeat.await_count == calls + 1
+    names = sorted(
+        device.name
+        for device in dr.async_entries_for_config_entry(
+            dr.async_get(hass), config_entry.entry_id
+        )
+    )
+    assert names == ["WxAlerts", "WxAlerts Cabin", "WxAlerts Home"]
+    assert hass.states.get(ACTIVE_ALERT).state == STATE_OFF
+
+
+async def test_a_revoke_announced_by_empty_places_keeps_devices_unavailable(
+    hass, config_entry, aioclient_mock, no_heartbeat, setup_integration
+):
+    from homeassistant.helpers import issue_registry as ir
+
+    from .test_coordinator import mock_heartbeat
+
+    mock_heartbeat(aioclient_mock, active=False, reason="revoked")
+    async def _real(*_args):
+        await no_heartbeat.original(setup_integration)
+
+    no_heartbeat.side_effect = _real
+    await feed(hass, setup_integration, TOPIC_TORNADO, encode(TORNADO_ALERT))
+
+    await feed(hass, setup_integration, TOPIC_PLACES, encode([]))
+    await hass.async_block_till_done()
+
+    assert ir.async_get(hass).async_get_issue(DOMAIN, "instance_revoked")
+    assert len(
+        dr.async_entries_for_config_entry(dr.async_get(hass), config_entry.entry_id)
+    ) == 3
+    for entity_id in (
+        ACTIVE_ALERT,
+        STORM,
+        ETA,
+        "geo_location.wxalerts_home_tornado_warning",
+    ):
+        assert hass.states.get(entity_id).state == STATE_UNAVAILABLE, entity_id
+
+
+async def test_an_empty_list_from_an_active_account_keeps_devices_until_replaced(
+    hass, config_entry, aioclient_mock, no_heartbeat, setup_integration
+):
+    """Really no places: entities go unavailable, devices stay. A later
+    non-empty list removes the ones it does not name."""
+    from .test_coordinator import mock_heartbeat
+
+    mock_heartbeat(aioclient_mock)
+    async def _real(*_args):
+        await no_heartbeat.original(setup_integration)
+
+    no_heartbeat.side_effect = _real
+
+    await feed(hass, setup_integration, TOPIC_PLACES, encode([]))
+    await hass.async_block_till_done()
+    assert hass.states.get(ACTIVE_ALERT).state == STATE_UNAVAILABLE
+    device_registry = dr.async_get(hass)
+    assert len(dr.async_entries_for_config_entry(device_registry, config_entry.entry_id)) == 3
+
+    await feed(hass, setup_integration, TOPIC_PLACES, encode([PLACE_HOME]))
+
+    names = sorted(
+        device.name
+        for device in dr.async_entries_for_config_entry(
+            device_registry, config_entry.entry_id
+        )
+    )
+    assert names == ["WxAlerts", "WxAlerts Home"]
+    assert hass.states.get(ACTIVE_ALERT).state == STATE_OFF
+
+
+async def test_a_status_with_a_reason_checks_standing_at_once(
+    hass, no_heartbeat, setup_integration
+):
+    calls = no_heartbeat.await_count
+    await feed(
+        hass,
+        setup_integration,
+        TOPIC_STATUS,
+        encode({**status(online=False), "reason": "revoked"}),
+    )
+    assert no_heartbeat.await_count == calls + 1
+    # A plain offline status, with no reason, is an outage, not a revoke.
+    await feed(hass, setup_integration, TOPIC_STATUS, encode(status(online=False)))
+    assert no_heartbeat.await_count == calls + 1
+
+
 async def test_a_malformed_places_payload_deletes_nothing(hass, setup_integration):
     await feed(hass, setup_integration, TOPIC_PLACES, encode({"oops": True}))
     await feed(hass, setup_integration, TOPIC_PLACES, b"not json")
@@ -555,10 +651,60 @@ async def test_a_marker_appears_for_a_hazard_with_geometry(hass, setup_integrati
     markers = geo_entities(hass)
     assert len(markers) == 1
     marker = markers[0]
-    assert marker.attributes["friendly_name"] == "Tornado Warning"
+    assert marker.attributes["friendly_name"] == "WxAlerts Home Tornado Warning"
     assert marker.attributes["latitude"] == pytest.approx(30.64, abs=0.01)
-    assert marker.attributes["places"] == ["Home"]
+    assert marker.entity_id == "geo_location.wxalerts_home_tornado_warning"
+    assert marker.attributes["place_name"] == "Home"
     assert marker.attributes["geometry"] == TORNADO_ALERT["geometry"]
+
+
+async def test_markers_belong_to_their_place_device(
+    hass, config_entry, setup_integration
+):
+    await feed(hass, setup_integration, TOPIC_TORNADO, encode(TORNADO_ALERT))
+
+    registry_entry = er.async_get(hass).async_get(
+        "geo_location.wxalerts_home_tornado_warning"
+    )
+    assert registry_entry.unique_id == (
+        f"{config_entry.entry_id}_place_101_geo_{TOPIC_TORNADO}"
+    )
+    device = dr.async_get(hass).async_get(registry_entry.device_id)
+    assert (DOMAIN, f"{config_entry.entry_id}_place_101") in device.identifiers
+
+
+async def test_each_place_in_a_county_gets_its_own_marker(
+    hass, mock_feed_client, enable_custom_integrations
+):
+    work = {**CACHED_PLACES[0], "id": "104", "name": "Work"}
+    coordinator = await start(hass, make_entry(places=[CACHED_PLACES[0], work]))
+    await feed(hass, coordinator, TOPIC_TORNADO, encode(TORNADO_ALERT))
+
+    ids = sorted(state.entity_id for state in geo_entities(hass))
+    assert ids == [
+        "geo_location.wxalerts_home_tornado_warning",
+        "geo_location.wxalerts_work_tornado_warning",
+    ]
+
+
+async def test_markers_go_with_their_place(hass, setup_integration):
+    await feed(hass, setup_integration, TOPIC_TORNADO, encode(TORNADO_ALERT))
+    await feed(hass, setup_integration, TOPIC_PLACES, encode([PLACE_CABIN]))
+
+    assert geo_entities(hass) == []
+    assert er.async_get(hass).async_get("geo_location.wxalerts_home_tornado_warning") is None
+
+
+async def test_a_place_added_later_gets_markers_for_live_hazards(
+    hass, mock_feed_client, enable_custom_integrations
+):
+    coordinator = await start(hass, make_entry(places=[CACHED_PLACES[1]]))
+    await feed(hass, coordinator, TOPIC_TORNADO, encode(TORNADO_ALERT))
+    assert geo_entities(hass) == []
+
+    await feed(hass, coordinator, TOPIC_PLACES, encode(PLACES))
+
+    assert hass.states.get("geo_location.wxalerts_home_tornado_warning")
 
 
 async def test_marker_geometry_is_kept_out_of_the_recorder(hass, setup_integration):

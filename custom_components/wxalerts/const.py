@@ -84,6 +84,9 @@ PLACE_SAME = "same"
 # status: retained heartbeat.
 STATUS_ONLINE = "online"
 STATUS_UPDATED_AT = "updated_at"
+# Present with online false when the server ends the session on purpose:
+# "revoked", "over_limit" or "plan_lapsed".
+STATUS_REASON = "reason"
 
 # storms/place/<place_id>/<storm_id>: retained while the cell threatens the
 # place; an empty retained message clears it.

@@ -26,6 +26,18 @@ from .coordinator import (
 MANUFACTURER = "WxAlerts.org"
 
 
+def place_device_info(entry_id: str, place: Place) -> DeviceInfo:
+    """The device every entity of a place hangs off."""
+    return DeviceInfo(
+        identifiers={place_device_identifier(entry_id, place.id)},
+        name=f"WxAlerts {place.name}",
+        manufacturer=MANUFACTURER,
+        model="Place",
+        entry_type=DeviceEntryType.SERVICE,
+        configuration_url="https://wxalerts.org",
+    )
+
+
 class WxAlertsPlaceEntity(Entity):
     """Base entity tied to one WxAlerts place.
 
@@ -48,14 +60,7 @@ class WxAlertsPlaceEntity(Entity):
         self.place_id = place.id
         entry_id = coordinator.entry.entry_id
         self._attr_unique_id = f"{entry_id}_place_{place.id}_{suffix}"
-        self._attr_device_info = DeviceInfo(
-            identifiers={place_device_identifier(entry_id, place.id)},
-            name=f"WxAlerts {place.name}",
-            manufacturer=MANUFACTURER,
-            model="Place",
-            entry_type=DeviceEntryType.SERVICE,
-            configuration_url="https://wxalerts.org",
-        )
+        self._attr_device_info = place_device_info(entry_id, place)
 
     @property
     def place(self) -> Place | None:
@@ -68,7 +73,11 @@ class WxAlertsPlaceEntity(Entity):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.connected and self.place is not None
+        return (
+            self.coordinator.connected
+            and self.coordinator.deactivated_reason is None
+            and self.place is not None
+        )
 
     async def async_added_to_hass(self) -> None:
         entry_id = self.coordinator.entry.entry_id

@@ -115,9 +115,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         device_registry = dr.async_get(hass)
         devices = dr.async_entries_for_config_entry(device_registry, entry.entry_id)
         for device in devices:
-            device_registry.async_update_device(
-                device.id, remove_config_entry_id=entry.entry_id
-            )
+            device_registry.async_remove_device(device.id)
 
         hass.config_entries.async_update_entry(
             entry,

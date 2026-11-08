@@ -18,7 +18,10 @@ Home Assistant is a **Supporter** feature. See
 
 Every place saved on your WxAlerts account becomes a device in Home
 Assistant, named `WxAlerts <place>`. Add, rename or delete a place on
-wxalerts.org and Home Assistant follows within seconds, with no restart.
+wxalerts.org and Home Assistant follows within seconds, with no restart. A
+device is only removed when the account lists other places but not that one;
+if the list ever comes back empty, the devices stay and their entities show
+as unavailable (delete them from the device page if you no longer want them).
 
 Each place gets:
 
@@ -65,9 +68,10 @@ Sign-in returns to Home Assistant through
   choices: revoke one, or add a Top-up.
 - Setting the integration up again on the same Home Assistant reuses its slot.
 - **Revoking sticks.** An instance revoked on the website stops and shows a
-  repair: "This Home Assistant was removed from your WxAlerts account". It
-  never signs itself back up; to add it back, open the re-authenticate prompt
-  and sign in.
+  repair: "This Home Assistant was removed from your WxAlerts account". Its
+  devices stay, with every entity unavailable, so nothing in your dashboards
+  or automations is deleted. It never signs itself back up; to add it back,
+  open the re-authenticate prompt and sign in.
 - If a plan lapses or packs drop, the newest instances beyond the quota are
   paused first. A paused instance shows a repair with the way to upgrade and
   resumes on its own once it is covered again.
@@ -121,9 +125,10 @@ storm cell entities turn unavailable rather than claiming the sky is clear.
 
 ### Map markers
 
-`geo_location` entities, one per live alert with a shape, at the polygon's
-centre. The polygon itself is the `geometry` attribute. They vanish when the
-alert ends.
+`geo_location` entities, one per live alert with a shape per place, at the
+polygon's centre, named like `geo_location.wxalerts_home_tornado_warning` and
+attached to the place's device. The polygon itself is the `geometry`
+attribute. They vanish when the alert ends and go with the place.
 
 ### Events
 

@@ -26,7 +26,13 @@ sign in to wxalerts.org. See *Upgrading from 0.x* in the README.
   it shows a repair, "This Home Assistant was removed from your WxAlerts
   account", and a re-authenticate prompt so you decide. An instance over the
   plan's limit or on a lapsed plan shows a repair with the pricing link and
-  resumes on its own once it is covered again.
+  resumes on its own once it is covered again. Devices are kept throughout,
+  with their entities unavailable. An empty places list, or a status message
+  with `online: false` and a `reason`, runs the standing check at once.
+- **Devices are never removed by an empty places list.** A place device goes
+  only when a non-empty list arrives without it.
+- **Map markers per place**, named `geo_location.wxalerts_<place>_<event>`,
+  with a unique id, on the place's device, and removed with the place.
 - **Places from the account.** One device per place, read from the retained
   `wxalerts/u/<username>/places` topic. Places added, renamed, moved or
   deleted on wxalerts.org follow live, with no restart; a deleted place takes
