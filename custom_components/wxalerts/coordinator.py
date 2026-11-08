@@ -15,7 +15,6 @@ import json
 import logging
 import ssl
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -30,14 +29,13 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.instance_id import async_get as async_get_instance_id
 from homeassistant.util import dt as dt_util
 from homeassistant.util.ssl import get_default_context
 
 from .const import (
     CONF_PLACES,
-    CONNECT_TIMEOUT_SECONDS,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_WS_PATH,
@@ -54,8 +52,8 @@ from .const import (
     PLACE_LON,
     PLACE_NAME,
     PLACE_SAME,
-    PLACES_WAIT_SECONDS,
-    PUBLIC_USERNAME,
+    RELOGIN_COOLDOWN_SECONDS,
+    RELOGIN_RETRY_SECONDS,
     RUNG_OPTIONS,
     SEVERITY_NONE,
     SEVERITY_ORDER,
@@ -105,18 +103,6 @@ _BACKOFF_RESET_AFTER = 120.0  # connection considered stable after this
 _PRIMING_SECONDS = 5.0
 
 _USER_AGENT = "WxAlerts-HA (github.com/wxalerts/WxAlerts-HA)"
-
-
-class InvalidAuth(Exception):
-    """The broker refused the username or password."""
-
-
-class SupporterRequired(Exception):
-    """The login works but has no account topics behind it."""
-
-
-class CannotConnect(Exception):
-    """The broker could not be reached."""
 
 
 def _reason_value(code: Any) -> int | None:
@@ -436,61 +422,6 @@ class FeedClient:
             backoff = min(backoff * 2, _BACKOFF_MAX)
 
 
-async def async_validate_login(
-    hass: HomeAssistant, username: str, password: str
-) -> list[dict[str, Any]] | None:
-    """Prove a login by connecting with it and subscribing to its own topics.
-
-    Returns the retained places list if it arrives within a few seconds, so a
-    new entry can create its devices straight away; None if it did not.
-
-    Raises InvalidAuth for a refused login, SupporterRequired for a login with
-    no account topics behind it (the shared public login, or a subscription
-    the broker refuses), and CannotConnect for anything else.
-    """
-    if username.strip().lower() == PUBLIC_USERNAME:
-        raise SupporterRequired
-
-    prefix = TOPIC_USER_PREFIX_FMT.format(username=username)
-    config = FeedConfig(
-        username=username,
-        password=password,
-        client_id=f"wxha-check-{uuid.uuid4().hex[:12]}",
-    )
-    places: list[dict[str, Any]] | None = None
-    try:
-        async with asyncio.timeout(CONNECT_TIMEOUT_SECONDS + PLACES_WAIT_SECONDS):
-            async with aiomqtt.Client(
-                **_client_kwargs(config, get_default_context())
-            ) as client:
-                codes = await client.subscribe(
-                    TOPIC_USER_WILDCARD_FMT.format(username=username), qos=1
-                )
-                if _denied(codes):
-                    raise SupporterRequired
-                try:
-                    async with asyncio.timeout(PLACES_WAIT_SECONDS):
-                        async for message in client.messages:
-                            if str(message.topic) != prefix + TOPIC_PLACES:
-                                continue
-                            try:
-                                decoded = json.loads(message.payload or b"null")
-                            except ValueError:
-                                decoded = None
-                            if isinstance(decoded, list):
-                                places = decoded
-                            break
-                except TimeoutError:
-                    pass
-    except aiomqtt.MqttError as err:
-        if is_auth_error(err):
-            raise InvalidAuth from err
-        raise CannotConnect from err
-    except (TimeoutError, OSError) as err:
-        raise CannotConnect from err
-    return places
-
-
 # ===========================================================================
 # Coordinator
 # ===========================================================================
@@ -650,8 +581,60 @@ class WxAlertsCoordinator:
 
     @callback
     def _handle_auth_failed(self) -> None:
-        """A rotated or revoked password: ask the user for the new one."""
-        self.entry.async_start_reauth(self.hass)
+        """The broker rejected the login: get a new one, or ask to sign in.
+
+        A password rotated or revoked on the website, or one replaced by a
+        re-registration elsewhere, is recovered by registering this instance
+        again with the stored token. Only when that fails does Home Assistant
+        ask the person to sign in again.
+        """
+        self.entry.async_create_background_task(
+            self.hass, self._async_recover_login(), "wxalerts_relogin"
+        )
+
+    async def _async_recover_login(self) -> None:
+        # Imported here: api imports the HA OAuth helpers, which the
+        # transport tests have no need to load.
+        from .api import (
+            ApiAuthError,
+            ApiUnavailable,
+            InstanceLimit,
+            SupporterRequired,
+            async_refresh_login,
+        )
+
+        last = self.hass.data.setdefault(DOMAIN, {}).get(self.entry.entry_id, 0.0)
+        if time.time() - last < RELOGIN_COOLDOWN_SECONDS:
+            # A login fetched minutes ago was rejected too. Looping on
+            # re-registration would only rotate passwords; ask instead.
+            self.entry.async_start_reauth(self.hass)
+            return
+        try:
+            await async_refresh_login(self.hass, self.entry)
+        except ApiUnavailable as err:
+            _LOGGER.warning(
+                "Could not reach wxalerts.org to renew the broker login (%s); "
+                "retrying in %d s",
+                err,
+                RELOGIN_RETRY_SECONDS,
+            )
+            self.entry.async_on_unload(
+                async_call_later(
+                    self.hass, RELOGIN_RETRY_SECONDS, self._retry_recover
+                )
+            )
+            return
+        except (ApiAuthError, SupporterRequired, InstanceLimit) as err:
+            _LOGGER.warning("WxAlerts needs you to sign in again: %s", err)
+            self.entry.async_start_reauth(self.hass)
+            return
+        self.hass.data[DOMAIN][self.entry.entry_id] = time.time()
+        _LOGGER.info("Renewed the WxAlerts broker login; reconnecting")
+        self.hass.config_entries.async_schedule_reload(self.entry.entry_id)
+
+    @callback
+    def _retry_recover(self, _now: Any) -> None:
+        self._handle_auth_failed()
 
     @callback
     def _tick(self, _now: Any = None) -> None:

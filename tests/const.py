@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 # Account
 USERNAME = "ha-k7x2q9mfw3"
 PASSWORD = "Wq8rT2zLp5"
+ACCESS_TOKEN = "at-1f9c2d"
+REFRESH_TOKEN = "rt-77ab01"
+INSTANCE_ID = "5c0f9a1e2b7d4c38a6e1f0d2c3b4a596"
 PREFIX = f"wxalerts/u/{USERNAME}/"
 TOPIC_PLACES = f"{PREFIX}places"
 TOPIC_STATUS = f"{PREFIX}status"
@@ -209,4 +212,20 @@ def storm(
         "issued_at": iso_now(-age_seconds - 120),
         "updated_at": iso_now(-age_seconds),
         **overrides,
+    }
+
+
+def registration(username: str = USERNAME, password: str = PASSWORD) -> dict:
+    """POST /integrations/home-assistant/instances, as the contract shapes it."""
+    return {
+        "instance_id": INSTANCE_ID,
+        "name": "Home",
+        "username": username,
+        "password": password,
+        "host": "mqtt.wxalerts.org",
+        "port": 443,
+        "ws_path": "/mqtt",
+        "transport": "websockets",
+        "tls": True,
+        "topic_prefix": f"wxalerts/u/{username}/",
     }

@@ -12,20 +12,33 @@ DEFAULT_PORT = 443
 DEFAULT_WS_PATH = "/mqtt"
 BROKER_URL = f"wss://{DEFAULT_HOST}{DEFAULT_WS_PATH}"
 
-# The shared read-only login. It still reaches the public alert topics, but it
-# has no account behind it, so it cannot carry places or storm cells. Entered
-# in the config flow it gets the Supporter upsell rather than a confusing
-# "no places" result.
-PUBLIC_USERNAME = "wxalerts"
-
-# Where a Free account goes to upgrade. Shown in the config flow error.
+# Where a Free account, or one out of Home Assistant slots, goes to upgrade.
 PRICING_URL = "https://wxalerts.org/pricing/"
-ACCOUNT_URL = "https://wxalerts.org/account/"
 
-# How long the config flow waits for the retained places list after a good
-# login. A miss is not an error: the running integration picks it up later.
-PLACES_WAIT_SECONDS = 5.0
-CONNECT_TIMEOUT_SECONDS = 20.0
+# ===========================================================================
+# Sign-in (authentik, OAuth2 authorization code with PKCE)
+# ===========================================================================
+# Public client: no secret, so it is safe to compile in. Replace the
+# placeholder with the id the authentik application reports.
+HA_OAUTH_CLIENT_ID = "wxalerts-home-assistant"
+# authentik serves one authorize and one token endpoint for every
+# application; the per-application issuer is
+# https://auth.wxalerts.org/application/o/<slug>/. Confirmed against the
+# wx-alerts-mobile issuer's .well-known/openid-configuration.
+OAUTH_ISSUER_BASE = "https://auth.wxalerts.org/application/o/"
+OAUTH_AUTHORIZE_URL = f"{OAUTH_ISSUER_BASE}authorize/"
+OAUTH_TOKEN_URL = f"{OAUTH_ISSUER_BASE}token/"
+OAUTH_SCOPES = "openid profile email offline_access"
+
+# Account API: registers this instance and returns its broker login.
+API_BASE_URL = "https://api.wxalerts.org"
+API_INSTANCES_URL = f"{API_BASE_URL}/integrations/home-assistant/instances"
+API_TIMEOUT_SECONDS = 20
+# A broker login refreshed this recently that is rejected again goes straight
+# to a new sign-in rather than looping on re-registration.
+RELOGIN_COOLDOWN_SECONDS = 600
+# Retry delay when the API cannot be reached during a login refresh.
+RELOGIN_RETRY_SECONDS = 300
 
 # Broker enforces 20 subscriptions per client; leave headroom.
 MAX_SUBSCRIPTIONS = 18
@@ -138,6 +151,10 @@ STORM_EXPIRE_SECONDS = 1800
 # ===========================================================================
 # Config entry / options keys
 # ===========================================================================
+# The OAuth token as Home Assistant's OAuth2 helper stores it.
+CONF_TOKEN = "token"
+# Home Assistant's installation id, as registered with the API.
+CONF_INSTANCE_ID = "instance_id"
 # Cached copy of the last places list, so entities exist at start-up before
 # the broker has replayed the retained topic.
 CONF_PLACES = "places"
@@ -148,7 +165,8 @@ CONF_EVENT_SENSORS = "event_sensors"
 CONF_PHENOMENON_SENSORS = "phenomenon_sensors"
 
 # Config entry schema version. 1 was every 0.x release (zones, lightning, the
-# public login); 2 is places and a per-user broker login.
+# public login); 2 is places, a wxalerts.org sign-in and a per-instance
+# broker login.
 CONFIG_VERSION = 2
 
 # ===========================================================================

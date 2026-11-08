@@ -4,17 +4,21 @@
 
 WxAlerts moves from Home Assistant zones to the places on your WxAlerts
 account, and from lightning to storm cell alerts. Home Assistant is now a
-Supporter feature with its own broker login.
+Supporter feature: sign in from Home Assistant and each instance gets its own
+broker login.
 
 **Breaking.** Upgrading removes every 0.x entity and device and asks you to
-sign in. See *Upgrading from 0.x* in the README.
+sign in to wxalerts.org. See *Upgrading from 0.x* in the README.
 
-- **Per-account login.** Setup asks for the Home Assistant username and
-  password created on wxalerts.org (Account, Home Assistant) and checks them by
-  connecting to `wss://mqtt.wxalerts.org/mqtt`. A bad login or a Free account
-  gets a short note that Home Assistant needs the Supporter plan, with a link
-  to pricing. A rotated, revoked or lapsed login starts a re-authenticate
-  prompt instead of retrying forever.
+- **Sign in from Home Assistant.** Adding the integration opens a wxalerts.org
+  sign-in in the browser (OAuth2 with PKCE, through My Home Assistant). The
+  integration then registers this instance with the API and stores its own
+  broker login; nothing is copied or pasted. Free accounts get a short note
+  that Home Assistant needs the Supporter plan, and a full instance quota a
+  note to revoke one or add a Top-up, both with a link to pricing.
+- **Self-healing login.** If the broker rejects the login, the integration
+  refreshes the sign-in and registers again for a fresh one, and only asks
+  you to sign in when that fails.
 - **Places from the account.** One device per place, read from the retained
   `wxalerts/u/<username>/places` topic. Places added, renamed, moved or
   deleted on wxalerts.org follow live, with no restart; a deleted place takes
@@ -33,8 +37,8 @@ sign in. See *Upgrading from 0.x* in the README.
   heartbeat, and a *Connected* sensor. Storm cell entities go unavailable when
   the heartbeat is 15 minutes old or reports offline. A 30 second timer keeps
   time-based state moving with no messages arriving.
-- **Diagnostics** download, with the username, password and place coordinates
-  redacted.
+- **Diagnostics** download, with the sign-in token, broker login, instance id
+  and place coordinates redacted.
 - **Removed:** GOES GLM lightning (every sensor, device, option, the history
   backfill and person tracking), zone selection, and the alerts and lightning
   toggles.

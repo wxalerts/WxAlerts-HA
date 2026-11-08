@@ -6,6 +6,7 @@ in this suite opens a socket.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,7 +22,14 @@ from custom_components.wxalerts.const import (
 from custom_components.wxalerts.coordinator import WxAlertsCoordinator
 from custom_components.wxalerts.events import DEFAULT_EVENT_KEYS
 
-from .const import CACHED_PLACES, PASSWORD, USERNAME
+from .const import (
+    ACCESS_TOKEN,
+    CACHED_PLACES,
+    INSTANCE_ID,
+    PASSWORD,
+    REFRESH_TOKEN,
+    USERNAME,
+)
 
 pytest_plugins = "pytest_homeassistant_custom_component"
 
@@ -42,6 +50,15 @@ def no_same_lookup():
         yield lookup
 
 
+@pytest.fixture(autouse=True)
+def oauth_registered(hass):
+    """Entries are set up with the sign-in implementation available, as
+    async_setup_entry registers it in production."""
+    from custom_components.wxalerts.api import async_register_oauth
+
+    async_register_oauth(hass)
+
+
 @pytest.fixture
 def mock_feed_client():
     """Replace the MQTT transport with a recorder.
@@ -60,6 +77,16 @@ def mock_feed_client():
         yield client_cls
 
 
+def make_token(expires_in: float = 3600) -> dict:
+    return {
+        "access_token": ACCESS_TOKEN,
+        "refresh_token": REFRESH_TOKEN,
+        "token_type": "Bearer",
+        "expires_in": expires_in,
+        "expires_at": time.time() + expires_in,
+    }
+
+
 def make_entry(places=None, options=None, **data) -> MockConfigEntry:
     return MockConfigEntry(
         domain=DOMAIN,
@@ -67,6 +94,9 @@ def make_entry(places=None, options=None, **data) -> MockConfigEntry:
         unique_id=DOMAIN,
         version=CONFIG_VERSION,
         data={
+            "auth_implementation": DOMAIN,
+            "token": make_token(),
+            "instance_id": INSTANCE_ID,
             CONF_USERNAME: USERNAME,
             CONF_PASSWORD: PASSWORD,
             CONF_PLACES: CACHED_PLACES if places is None else places,

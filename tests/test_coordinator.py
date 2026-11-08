@@ -13,7 +13,12 @@ import pytest
 from homeassistant.config_entries import SOURCE_REAUTH
 from pytest_homeassistant_custom_component.common import async_capture_events
 
+from homeassistant.const import CONF_PASSWORD
+
 from custom_components.wxalerts.const import (
+    API_INSTANCES_URL,
+    DOMAIN,
+    OAUTH_TOKEN_URL,
     EVENT_ALERT,
     EVENT_HAZARD,
     EVENT_STORM_CELL,
@@ -25,8 +30,10 @@ from custom_components.wxalerts.coordinator import (
     threat_for_rung,
 )
 
-from .conftest import feed, make_entry
+from .conftest import feed, make_entry, make_token, start
 from .const import (
+    ACCESS_TOKEN,
+    registration,
     CACHED_PLACES,
     HEAT_ALERT,
     PLACE_BOAT,
@@ -448,16 +455,147 @@ def test_threat_for_rung(rung, expected):
 # ===========================================================================
 # Connection and authentication
 # ===========================================================================
-async def test_a_rejected_login_starts_reauth(hass, mock_feed_client, enable_custom_integrations):
-    from .conftest import start
+def _flows(hass):
+    return [
+        flow["context"]["source"]
+        for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    ]
 
-    entry = make_entry()
-    coordinator = await start(hass, entry)
+
+async def _reject_login(hass, coordinator):
     coordinator._handle_auth_failed()
     await hass.async_block_till_done()
 
-    flows = hass.config_entries.flow.async_progress()
-    assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
+
+async def test_a_rejected_login_is_renewed_without_asking(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations
+):
+    """A password rotated on the website: register again with the stored
+    token, reconnect with the new login, and never bother the person."""
+    entry = make_entry()
+    coordinator = await start(hass, entry)
+    aioclient_mock.post(API_INSTANCES_URL, json=registration(password="renewed"))
+
+    await _reject_login(hass, coordinator)
+
+    assert entry.data[CONF_PASSWORD] == "renewed"
+    assert _flows(hass) == []
+    assert aioclient_mock.mock_calls[0][3]["Authorization"] == f"Bearer {ACCESS_TOKEN}"
+    # Reloaded onto the new login.
+    assert entry.runtime_data is not coordinator
+    assert mock_feed_client.call_args[0][0].password == "renewed"
+
+
+async def test_an_expired_token_is_refreshed_before_registering(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations
+):
+    entry = make_entry(token=make_token(expires_in=-60))
+    coordinator = await start(hass, entry)
+    aioclient_mock.post(
+        OAUTH_TOKEN_URL,
+        json={"access_token": "refreshed", "refresh_token": "r2", "expires_in": 3600},
+    )
+    aioclient_mock.post(API_INSTANCES_URL, json=registration(password="renewed"))
+
+    await _reject_login(hass, coordinator)
+
+    assert entry.data["token"]["access_token"] == "refreshed"
+    assert aioclient_mock.mock_calls[1][3]["Authorization"] == "Bearer refreshed"
+    assert entry.data[CONF_PASSWORD] == "renewed"
+
+
+async def test_a_refused_token_gets_one_forced_refresh(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations
+):
+    entry = make_entry()
+    coordinator = await start(hass, entry)
+    aioclient_mock.post(
+        OAUTH_TOKEN_URL,
+        json={"access_token": "refreshed", "refresh_token": "r2", "expires_in": 3600},
+    )
+
+    async def _register(method, url, data):
+        from pytest_homeassistant_custom_component.test_util.aiohttp import (
+            AiohttpClientMockResponse,
+        )
+
+        calls = [c for c in aioclient_mock.mock_calls if str(c[1]) == API_INSTANCES_URL]
+        if len(calls) == 1:
+            return AiohttpClientMockResponse(method, url, status=401, json={})
+        return AiohttpClientMockResponse(method, url, json=registration(password="renewed"))
+
+    aioclient_mock.post(API_INSTANCES_URL, side_effect=_register)
+
+    await _reject_login(hass, coordinator)
+
+    assert entry.data[CONF_PASSWORD] == "renewed"
+    assert entry.data["token"]["access_token"] == "refreshed"
+    assert _flows(hass) == []
+
+
+@pytest.mark.parametrize(
+    ("token_status", "api_status", "api_body"),
+    [
+        (400, None, None),  # refresh token revoked
+        (None, 403, {"detail": {"code": "supporter_required"}}),
+        (None, 409, {"detail": {"code": "instance_limit", "limit": 1, "used": 1}}),
+    ],
+)
+async def test_when_renewal_fails_it_asks_to_sign_in(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations,
+    token_status, api_status, api_body,
+):
+    expires = -60 if token_status else 3600
+    entry = make_entry(token=make_token(expires_in=expires))
+    coordinator = await start(hass, entry)
+    if token_status:
+        aioclient_mock.post(OAUTH_TOKEN_URL, status=token_status, json={"error": "invalid_grant"})
+    else:
+        aioclient_mock.post(API_INSTANCES_URL, status=api_status, json=api_body)
+
+    await _reject_login(hass, coordinator)
+
+    assert _flows(hass) == [SOURCE_REAUTH]
+
+
+async def test_an_unreachable_api_retries_later_instead_of_asking(
+    hass, freezer, aioclient_mock, mock_feed_client, enable_custom_integrations
+):
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    entry = make_entry()
+    coordinator = await start(hass, entry)
+    aioclient_mock.post(API_INSTANCES_URL, status=503)
+
+    await _reject_login(hass, coordinator)
+    assert _flows(hass) == []
+    assert aioclient_mock.call_count == 1
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(API_INSTANCES_URL, json=registration(password="renewed"))
+    freezer.tick(timedelta(seconds=301))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+
+    assert entry.data[CONF_PASSWORD] == "renewed"
+
+
+async def test_a_fresh_login_rejected_again_asks_instead_of_looping(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations
+):
+    entry = make_entry()
+    await start(hass, entry)
+    aioclient_mock.post(API_INSTANCES_URL, json=registration(password="renewed"))
+    await _reject_login(hass, entry.runtime_data)
+    assert _flows(hass) == []
+
+    await _reject_login(hass, entry.runtime_data)
+
+    assert _flows(hass) == [SOURCE_REAUTH]
+    assert aioclient_mock.call_count == 1
 
 
 async def test_connection_state_reaches_the_entities(hass, setup_integration):

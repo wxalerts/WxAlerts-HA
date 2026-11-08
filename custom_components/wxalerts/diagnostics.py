@@ -1,7 +1,8 @@
 """Diagnostics for a WxAlerts entry.
 
-The broker username names the account's topic tree and the password opens
-it, so both are redacted, along with place coordinates. Topics are reported
+The OAuth token signs in to the account, the broker password opens its topic
+tree and the username names it, so all three are redacted, along with the
+instance id and place coordinates. Topics are reported
 with the username replaced, which keeps their shape readable in a bug report.
 """
 
@@ -14,9 +15,16 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 
 from . import WxAlertsConfigEntry
-from .const import PLACE_LAT, PLACE_LON
+from .const import CONF_INSTANCE_ID, CONF_TOKEN, PLACE_LAT, PLACE_LON
 
-TO_REDACT = {CONF_USERNAME, CONF_PASSWORD, PLACE_LAT, PLACE_LON}
+TO_REDACT = {
+    CONF_USERNAME,
+    CONF_PASSWORD,
+    CONF_TOKEN,
+    CONF_INSTANCE_ID,
+    PLACE_LAT,
+    PLACE_LON,
+}
 
 
 async def async_get_config_entry_diagnostics(

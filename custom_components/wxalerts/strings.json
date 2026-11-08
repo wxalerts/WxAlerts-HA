@@ -1,44 +1,40 @@
 {
   "config": {
     "step": {
-      "user": {
-        "title": "Connect your WxAlerts account",
-        "description": "Enter the Home Assistant login from wxalerts.org (Account, Home Assistant: {account_url}). Your places, their alerts and storm cells come from your account. Home Assistant needs the Supporter plan: {pricing_url}",
-        "data": {
-          "username": "Username",
-          "password": "Password"
-        },
-        "data_description": {
-          "username": "Starts with ha-. Shown on wxalerts.org under Account, Home Assistant.",
-          "password": "Shown once when you create or rotate the login."
-        }
+      "pick_implementation": {
+        "title": "Sign in to WxAlerts"
       },
       "reauth_confirm": {
         "title": "Sign in to WxAlerts again",
-        "description": "WxAlerts needs the Home Assistant login from your account. If you are upgrading from 0.x, or rotated the password on wxalerts.org, enter the current login from Account, Home Assistant ({account_url}). Home Assistant needs the Supporter plan: {pricing_url}",
-        "data": {
-          "username": "Username",
-          "password": "Password"
-        }
+        "description": "WxAlerts needs you to sign in to your wxalerts.org account again. This happens after upgrading from 0.x, or when this instance was revoked on the website."
       }
     },
-    "error": {
-      "invalid_auth": "That login did not work. Check the username and password on wxalerts.org under Account, Home Assistant, or rotate the password there. Home Assistant needs the Supporter plan. Supporters create this login on wxalerts.org under Account, Home Assistant. Upgrade at {pricing_url}",
-      "supporter_required": "Home Assistant needs the Supporter plan. Supporters create this login on wxalerts.org under Account, Home Assistant. Upgrade at {pricing_url}",
-      "cannot_connect": "Could not reach the WxAlerts broker (mqtt.wxalerts.org). Check your internet connection and try again.",
-      "unknown": "Something unexpected went wrong. Check the Home Assistant log for details."
-    },
     "abort": {
+      "supporter_required": "Home Assistant needs the Supporter plan on your WxAlerts account. Upgrade at {pricing_url}",
+      "instance_limit": "Your plan's {limit} Home Assistant instance slots are all in use. Revoke one on wxalerts.org under Account, Home Assistant, or add a Top-up pack for one more: {pricing_url}",
+      "cannot_connect": "Could not reach wxalerts.org. Check your internet connection and try again.",
       "already_configured": "WxAlerts is already set up.",
       "single_instance_allowed": "WxAlerts is already set up. One account per Home Assistant.",
-      "reauth_successful": "Signed in again. WxAlerts is reconnecting."
+      "reauth_successful": "Signed in again. WxAlerts is reconnecting.",
+      "oauth_error": "wxalerts.org sent back an invalid sign-in token.",
+      "oauth_failed": "Signing in to wxalerts.org failed. Try again.",
+      "oauth_timeout": "Signing in to wxalerts.org timed out. Try again.",
+      "oauth_unauthorized": "wxalerts.org did not accept the sign-in. Try again.",
+      "oauth_implementation_unavailable": "The WxAlerts sign-in is unavailable right now. Try again later.",
+      "missing_configuration": "The WxAlerts sign-in is not configured.",
+      "authorize_url_timeout": "Timed out preparing the sign-in link.",
+      "no_url_available": "Home Assistant has no URL to return to after signing in. Enable My Home Assistant: {docs_url}",
+      "user_rejected_authorize": "Sign-in was cancelled: {error}"
+    },
+    "create_entry": {
+      "default": "Signed in. Your places will appear in a few seconds."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "WxAlerts options",
-        "description": "Pick the alert types you want as binary sensors on each place. Anything you leave out is still available as a device trigger on each place. Places are managed on wxalerts.org.",
+        "description": "Pick the alert types you want as binary sensors on each place. Anything you leave out is still available as a device trigger. Places are managed on wxalerts.org.",
         "data": {
           "event_sensors": "Alert types to create sensors for"
         }

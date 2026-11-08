@@ -1,8 +1,9 @@
 """Config flow for the WxAlerts integration.
 
-The user enters the Home Assistant broker login created on wxalerts.org
-(Account, Home Assistant). It is validated by connecting with it and
-subscribing to the account's own topics; places then come from the account.
+The person signs in to their wxalerts.org account in the browser (OAuth2 with
+PKCE through authentik). The integration then registers this Home Assistant
+instance with the API and stores the broker login it gets back. Nothing is
+copied or pasted.
 """
 
 from __future__ import annotations
@@ -14,29 +15,30 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import (
+    SOURCE_REAUTH,
     ConfigEntry,
-    ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
-from homeassistant.helpers import selector
+from homeassistant.helpers import config_entry_oauth2_flow, selector
+from homeassistant.helpers.instance_id import async_get as async_get_instance_id
 
+from .api import (
+    ApiAuthError,
+    ApiUnavailable,
+    InstanceLimit,
+    SupporterRequired,
+    async_register_instance,
+    async_register_oauth,
+    broker_data,
+)
 from .const import (
-    ACCOUNT_URL,
     CONF_EVENT_SENSORS,
     CONF_PLACES,
     CONFIG_VERSION,
     DOMAIN,
     PRICING_URL,
-)
-from .coordinator import (
-    CannotConnect,
-    InvalidAuth,
-    SupporterRequired,
-    async_validate_login,
-    parse_places,
 )
 from .events import DEFAULT_EVENT_KEYS, SELECTABLE_EVENTS
 from .options import selected_event_keys
@@ -58,112 +60,81 @@ _EVENT_SELECTOR = selector.SelectSelector(
 )
 
 
-def _login_schema(defaults: Mapping[str, Any]) -> vol.Schema:
-    return vol.Schema(
-        {
-            vol.Required(
-                CONF_USERNAME, default=defaults.get(CONF_USERNAME, "")
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(autocomplete="username")
-            ),
-            vol.Required(CONF_PASSWORD): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.PASSWORD,
-                    autocomplete="current-password",
-                )
-            ),
-        }
-    )
+class WxAlertsConfigFlow(
+    config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=DOMAIN
+):
+    """Sign in, register this instance, done."""
 
-
-_PLACEHOLDERS = {"pricing_url": PRICING_URL, "account_url": ACCOUNT_URL}
-
-
-class WxAlertsConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle setup and re-authentication."""
-
+    DOMAIN = DOMAIN
     VERSION = CONFIG_VERSION
     MINOR_VERSION = 1
 
-    async def _async_check(
-        self, user_input: dict[str, Any]
-    ) -> tuple[dict[str, str], list[dict[str, Any]] | None]:
-        """Validate a login. Returns (errors, places)."""
-        username = user_input[CONF_USERNAME].strip()
-        try:
-            places = await async_validate_login(
-                self.hass, username, user_input[CONF_PASSWORD]
-            )
-        except InvalidAuth:
-            return {"base": "invalid_auth"}, None
-        except SupporterRequired:
-            return {"base": "supporter_required"}, None
-        except CannotConnect:
-            return {"base": "cannot_connect"}, None
-        except Exception:  # noqa: BLE001 - surface anything else as unknown
-            _LOGGER.exception("Unexpected error validating the WxAlerts login")
-            return {"base": "unknown"}, None
-        return {}, places
+    @property
+    def logger(self) -> logging.Logger:
+        return _LOGGER
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        await self.async_set_unique_id(DOMAIN)
-        self._abort_if_unique_id_configured()
-
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            errors, places = await self._async_check(user_input)
-            if not errors:
-                parsed = parse_places(places) or {}
-                return self.async_create_entry(
-                    title="WxAlerts",
-                    data={
-                        CONF_USERNAME: user_input[CONF_USERNAME].strip(),
-                        CONF_PASSWORD: user_input[CONF_PASSWORD],
-                        CONF_PLACES: [place.as_dict() for place in parsed.values()],
-                    },
-                    # Written explicitly so a fresh entry never depends on a
-                    # migration path to know what it selected.
-                    options={CONF_EVENT_SENSORS: list(DEFAULT_EVENT_KEYS)},
-                )
-
-        return self.async_show_form(
-            step_id="user",
-            data_schema=_login_schema(user_input or {}),
-            errors=errors,
-            description_placeholders=_PLACEHOLDERS,
-        )
+        if self.source != SOURCE_REAUTH:
+            await self.async_set_unique_id(DOMAIN)
+            self._abort_if_unique_id_configured()
+        # Registered here as well as at setup: a flow can start before the
+        # integration has ever been set up.
+        async_register_oauth(self.hass)
+        return await super().async_step_user(user_input)
 
     async def async_step_reauth(
         self, entry_data: Mapping[str, Any]
     ) -> ConfigFlowResult:
-        """A rotated password, a lapsed plan, or an upgrade from 0.x."""
+        """The broker login could not be renewed, or an upgrade from 0.x."""
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        entry = self._get_reauth_entry()
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            errors, places = await self._async_check(user_input)
-            if not errors:
-                updates: dict[str, Any] = {
-                    CONF_USERNAME: user_input[CONF_USERNAME].strip(),
-                    CONF_PASSWORD: user_input[CONF_PASSWORD],
-                }
-                parsed = parse_places(places)
-                if parsed is not None:
-                    updates[CONF_PLACES] = [p.as_dict() for p in parsed.values()]
-                return self.async_update_reload_and_abort(entry, data_updates=updates)
+        if user_input is None:
+            return self.async_show_form(step_id="reauth_confirm")
+        return await self.async_step_user()
 
-        defaults = user_input or {CONF_USERNAME: entry.data.get(CONF_USERNAME, "")}
-        return self.async_show_form(
-            step_id="reauth_confirm",
-            data_schema=_login_schema(defaults),
-            errors=errors,
-            description_placeholders=_PLACEHOLDERS,
+    async def async_oauth_create_entry(self, data: dict[str, Any]) -> ConfigFlowResult:
+        """Signed in: register this instance and keep its broker login."""
+        placeholders = {"pricing_url": PRICING_URL}
+        try:
+            registration = await async_register_instance(
+                self.hass, data["token"]["access_token"]
+            )
+        except SupporterRequired:
+            return self.async_abort(
+                reason="supporter_required", description_placeholders=placeholders
+            )
+        except InstanceLimit as err:
+            return self.async_abort(
+                reason="instance_limit",
+                description_placeholders={
+                    "pricing_url": err.upgrade_url,
+                    "limit": str(err.limit if err.limit is not None else "?"),
+                },
+            )
+        except ApiAuthError:
+            return self.async_abort(reason="oauth_unauthorized")
+        except ApiUnavailable as err:
+            _LOGGER.warning("Could not register with wxalerts.org: %s", err)
+            return self.async_abort(reason="cannot_connect")
+
+        instance_id = await async_get_instance_id(self.hass)
+        entry_data = {**data, **broker_data(registration, instance_id)}
+
+        if self.source == SOURCE_REAUTH:
+            return self.async_update_reload_and_abort(
+                self._get_reauth_entry(), data_updates=entry_data
+            )
+        return self.async_create_entry(
+            title="WxAlerts",
+            data={**entry_data, CONF_PLACES: []},
+            # Written explicitly so a fresh entry never depends on a migration
+            # path to know what it selected.
+            options={CONF_EVENT_SENSORS: list(DEFAULT_EVENT_KEYS)},
         )
 
     @staticmethod

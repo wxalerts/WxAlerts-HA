@@ -11,12 +11,13 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntry
 
-from .const import CONF_EVENT_SENSORS, CONF_PLACES, CONFIG_VERSION, DOMAIN
+from .api import ApiError, ApiUnavailable, async_refresh_login, async_register_oauth
+from .const import CONF_EVENT_SENSORS, CONF_PLACES, CONF_TOKEN, CONFIG_VERSION, DOMAIN
 from .coordinator import WxAlertsCoordinator, place_device_identifier
 from .options import selected_event_keys
 
@@ -33,14 +34,20 @@ WxAlertsConfigEntry = ConfigEntry[WxAlertsCoordinator]
 
 async def async_setup_entry(hass: HomeAssistant, entry: WxAlertsConfigEntry) -> bool:
     """Set up WxAlerts from a config entry."""
-    if not entry.data.get(CONF_USERNAME) or not entry.data.get(CONF_PASSWORD):
+    async_register_oauth(hass)
+    if CONF_TOKEN not in entry.data:
         # An entry migrated from 0.x used the shared public login and has no
-        # account behind it. Home Assistant turns this into a re-authenticate
-        # prompt asking for the new broker login.
-        raise ConfigEntryAuthFailed(
-            "WxAlerts 1.0 needs the Home Assistant login from your wxalerts.org "
-            "account"
-        )
+        # account behind it. Home Assistant turns this into a sign-in prompt.
+        raise ConfigEntryAuthFailed("WxAlerts 1.0 needs you to sign in to wxalerts.org")
+    if not entry.data.get(CONF_USERNAME) or not entry.data.get(CONF_PASSWORD):
+        # Signed in, but the broker login never arrived (the API was down when
+        # the flow finished, or it was cleared). Register now.
+        try:
+            await async_refresh_login(hass, entry)
+        except ApiUnavailable as err:
+            raise ConfigEntryNotReady(f"wxalerts.org is unreachable: {err}") from err
+        except ApiError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
 
     coordinator = WxAlertsCoordinator(hass, entry)
     entry.runtime_data = coordinator
@@ -89,8 +96,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     automation pointed at one would look fine while never firing again, so they
     are removed here, at the moment someone is looking.
 
-    The new entry has no broker login yet. Setup then raises
-    ConfigEntryAuthFailed, which asks for it instead of failing silently.
+    The new entry has no sign-in yet. Setup then raises ConfigEntryAuthFailed,
+    which starts the wxalerts.org sign-in instead of failing silently.
     """
     if entry.version > CONFIG_VERSION:
         # A downgrade from a future release: refuse rather than guess.
@@ -121,8 +128,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         _LOGGER.info(
             "Migrated WxAlerts from 0.x: removed %d zone and lightning entities "
-            "and %d devices. Enter the Home Assistant login from your "
-            "wxalerts.org account to finish the upgrade",
+            "and %d devices. Sign in to wxalerts.org from the re-authenticate "
+            "prompt to finish the upgrade",
             len(stale),
             len(devices),
         )

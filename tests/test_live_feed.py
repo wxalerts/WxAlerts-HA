@@ -2,6 +2,9 @@
 
     WXALERTS_HA_USERNAME=ha-... WXALERTS_HA_PASSWORD=... pytest -m live
 
+The credentials are a broker login for one Home Assistant instance (from the
+website's advanced "create credentials manually" option).
+
 Everything else in this suite fakes the MQTT layer, which cannot tell you
 that TLS, websockets, MQTT v5 or the login still work. These tests dial
 ``wss://mqtt.wxalerts.org/mqtt`` for real with a Supporter account's Home
@@ -20,7 +23,6 @@ import pytest
 import pytest_socket
 
 from custom_components.wxalerts.const import DEFAULT_HOST
-from custom_components.wxalerts.coordinator import async_validate_login
 
 from .conftest import make_entry
 
@@ -48,11 +50,6 @@ def allow_the_internet():
         pytest.skip("set WXALERTS_HA_USERNAME and WXALERTS_HA_PASSWORD")
     pytest_socket._remove_restrictions()
     yield
-
-
-async def test_the_login_validates_and_returns_places(hass, allow_the_internet):
-    places = await async_validate_login(hass, USERNAME, PASSWORD)
-    print(f"\nlive: places={places!r}")
 
 
 @pytest.fixture

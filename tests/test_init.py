@@ -9,6 +9,9 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.wxalerts.const import (
+    API_INSTANCES_URL,
+    OAUTH_AUTHORIZE_URL,
+    OAUTH_TOKEN_URL,
     CONF_EVENT_SENSORS,
     CONF_PLACES,
     CONFIG_VERSION,
@@ -17,7 +20,20 @@ from custom_components.wxalerts.const import (
 from custom_components.wxalerts.diagnostics import async_get_config_entry_diagnostics
 
 from .conftest import feed, make_entry
-from .const import PASSWORD, TOPIC_STATUS, USERNAME, encode, status, storm, storm_topic
+from .const import (
+    ACCESS_TOKEN,
+    PASSWORD,
+    PLACES,
+    REFRESH_TOKEN,
+    TOPIC_PLACES,
+    TOPIC_STATUS,
+    USERNAME,
+    encode,
+    registration,
+    status,
+    storm,
+    storm_topic,
+)
 
 # A v0.4.0 entry exactly as that release wrote it: zones resolved to counties,
 # lightning on, the shared public login implied, no account at all.
@@ -121,12 +137,13 @@ async def test_a_v040_entry_is_migrated_and_asks_for_the_login(
     mock_feed_client.assert_not_called()
 
 
-async def test_a_migrated_entry_comes_up_after_the_login_is_entered(
-    hass, mock_feed_client, enable_custom_integrations
+async def test_a_migrated_entry_comes_up_after_signing_in(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations,
+    current_request_with_host,
 ):
-    from unittest.mock import AsyncMock, patch
+    from urllib.parse import parse_qs, urlparse
 
-    from .const import PLACES
+    from homeassistant.helpers.config_entry_oauth2_flow import _decode_jwt
 
     entry = _v040_entry()
     entry.add_to_hass(hass)
@@ -134,20 +151,26 @@ async def test_a_migrated_entry_comes_up_after_the_login_is_entered(
     await hass.async_block_till_done()
     flow = hass.config_entries.flow.async_progress_by_handler(DOMAIN)[0]
 
-    with patch(
-        "custom_components.wxalerts.config_flow.async_validate_login",
-        AsyncMock(return_value=PLACES),
-    ):
-        result = await hass.config_entries.flow.async_configure(
-            flow["flow_id"], {CONF_USERNAME: USERNAME, CONF_PASSWORD: PASSWORD}
-        )
-        await hass.async_block_till_done()
+    result = await hass.config_entries.flow.async_configure(flow["flow_id"], {})
+    assert result["url"].startswith(OAUTH_AUTHORIZE_URL)
+    state = _decode_jwt(hass, parse_qs(urlparse(result["url"]).query)["state"][0])
+    aioclient_mock.post(
+        OAUTH_TOKEN_URL,
+        json={"access_token": "a", "refresh_token": "r", "expires_in": 3600},
+    )
+    aioclient_mock.post(API_INSTANCES_URL, json=registration())
+    await hass.config_entries.flow.async_configure(
+        flow["flow_id"], {"code": "c", "state": state}
+    )
+    result = await hass.config_entries.flow.async_configure(flow["flow_id"])
+    await hass.async_block_till_done()
 
     assert result["reason"] == "reauth_successful"
     assert entry.state is ConfigEntryState.LOADED
     assert entry.data[CONF_USERNAME] == USERNAME
+    await feed(hass, entry.runtime_data, TOPIC_PLACES, encode(PLACES))
     assert hass.states.get("binary_sensor.wxalerts_home_storm_cell_approaching")
-    # The old tornado sensor's selection carried over onto the place.
+    # The old selection carried over onto the place.
     assert hass.states.get("binary_sensor.wxalerts_home_tornado_watch")
 
 
@@ -177,15 +200,41 @@ async def test_an_entry_from_a_future_version_is_refused(hass, enable_custom_int
     assert entry.state is ConfigEntryState.MIGRATION_ERROR
 
 
-async def test_a_current_entry_without_credentials_asks_for_them(
+async def test_an_entry_without_a_sign_in_asks_for_one(
     hass, mock_feed_client, enable_custom_integrations
 ):
-    entry = make_entry(**{CONF_PASSWORD: ""})
+    entry = make_entry()
     entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        entry, data={k: v for k, v in entry.data.items() if k != "token"}
+    )
     assert not await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.SETUP_ERROR
     assert hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+
+
+async def test_a_missing_broker_login_is_registered_at_setup(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations
+):
+    entry = make_entry(**{CONF_PASSWORD: ""})
+    aioclient_mock.post(API_INSTANCES_URL, json=registration())
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.data[CONF_PASSWORD] == PASSWORD
+    assert entry.state is ConfigEntryState.LOADED
+
+
+async def test_an_unreachable_api_at_setup_retries(
+    hass, aioclient_mock, mock_feed_client, enable_custom_integrations
+):
+    entry = make_entry(**{CONF_PASSWORD: ""})
+    aioclient_mock.post(API_INSTANCES_URL, status=503)
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_RETRY
 
 
 async def test_a_stale_place_device_can_be_deleted_and_a_live_one_cannot(
@@ -220,8 +269,11 @@ async def test_diagnostics_redact_the_login_and_coordinates(
     assert PASSWORD not in text
     assert USERNAME not in text
     assert "30.6435" not in text
+    assert ACCESS_TOKEN not in text and REFRESH_TOKEN not in text
     assert result["entry"]["data"][CONF_USERNAME] == "**REDACTED**"
     assert result["entry"]["data"][CONF_PASSWORD] == "**REDACTED**"
+    assert result["entry"]["data"]["token"] == "**REDACTED**"
+    assert result["entry"]["data"]["instance_id"] == "**REDACTED**"
     assert result["entry"]["data"][CONF_PLACES][0]["lat"] == "**REDACTED**"
     assert result["subscriptions"][0] == {"topic": "wxalerts/u/**REDACTED**/#", "qos": 1}
     state = result["state"]

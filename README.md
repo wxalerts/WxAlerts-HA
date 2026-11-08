@@ -33,14 +33,7 @@ Each place gets:
 
 ## Installation
 
-### 1. Create the Home Assistant login on wxalerts.org
-
-1. Sign in at [wxalerts.org](https://wxalerts.org) with a Supporter account.
-2. Open **Account**, then **Home Assistant**, and create the login.
-3. Copy the username (it starts with `ha-`) and the password. The password
-   is shown once; you can rotate it there at any time.
-
-### 2. Install with HACS
+### 1. Install with HACS
 
 1. In HACS, open the menu and choose **Custom repositories**.
 2. Add `https://github.com/wxalerts/WxAlerts-HA` with category
@@ -50,15 +43,27 @@ Each place gets:
 Manual install: copy `custom_components/wxalerts` into your
 `config/custom_components` folder and restart.
 
-### 3. Add the integration
+### 2. Add the integration and sign in
 
 **Settings**, **Devices & services**, **Add integration**, **WxAlerts**.
-Enter the username and password from step 1. The integration connects to
-`wss://mqtt.wxalerts.org/mqtt` to check them, then creates one device per
-place.
+A browser window opens on wxalerts.org: sign in with your WxAlerts account
+and approve. That is all. The integration registers this Home Assistant with
+your account, gets its own broker login, and creates one device per place.
 
-A Free account sees a short note that Home Assistant needs the Supporter
-plan, with a link to upgrade.
+Sign-in returns to Home Assistant through
+[My Home Assistant](https://my.home-assistant.io/), which is on by default
+(the `my` integration, part of `default_config`). Keep it enabled.
+
+### Plans and instances
+
+- Free accounts see a short note that Home Assistant needs the Supporter
+  plan, with a link to upgrade.
+- Supporter includes 1 Home Assistant instance. Each Top-up pack adds 1 more.
+- Every instance is listed on wxalerts.org under **Account**, **Home
+  Assistant**, with when it was added and last seen, and can be revoked on
+  its own. A full quota shows a note in the setup dialog with the same
+  choices: revoke one, or add a Top-up.
+- Setting the integration up again on the same Home Assistant reuses its slot.
 
 ## Entities and events
 
@@ -240,7 +245,7 @@ available as a device trigger. Places are managed on wxalerts.org.
 - **Lightning is removed** in favour of storm cell alerts. All lightning
   sensors, the lightning devices, person tracking and the lightning options
   are gone.
-- **A Supporter login replaces the shared public login.**
+- **Signing in to your WxAlerts account replaces the shared public login.**
 
 What happens on upgrade:
 
@@ -248,9 +253,8 @@ What happens on upgrade:
    lightning) is removed from the registry, so nothing lingers as
    unavailable.
 2. Your alert type selection is kept.
-3. Home Assistant shows a **re-authenticate** prompt for WxAlerts. Enter the
-   Home Assistant login from wxalerts.org (Account, Home Assistant) and your
-   places appear.
+3. Home Assistant shows a **re-authenticate** prompt for WxAlerts. Open it,
+   sign in to wxalerts.org, and your places appear.
 
 Automations that pointed at 0.x entities need repointing: the new ids are
 `binary_sensor.wxalerts_<place>_...` per place. Automations on the
@@ -259,11 +263,18 @@ Automations that pointed at 0.x entities need repointing: the new ids are
 
 ## Troubleshooting
 
-- **"That login did not work"**: check the username and password under
-  Account, Home Assistant on wxalerts.org, or rotate the password there and
-  enter the new one. Home Assistant needs the Supporter plan.
-- **Re-authenticate prompt after it was working**: the password was rotated
-  or revoked, or the Supporter plan lapsed. Enter the current login.
+- **"Home Assistant needs the Supporter plan"**: upgrade at
+  [wxalerts.org/pricing](https://wxalerts.org/pricing/), then add the
+  integration again.
+- **"All Home Assistant instance slots are in use"**: revoke an instance you
+  no longer use on wxalerts.org (Account, Home Assistant), or add a Top-up
+  pack for one more.
+- **Sign-in window never returns to Home Assistant**: My Home Assistant must
+  be enabled, and its instance URL must point at this Home Assistant.
+- **Re-authenticate prompt after it was working**: the instance was revoked
+  on the website, the plan lapsed, or the sign-in expired. A rotated broker
+  password is renewed on its own; the prompt only appears when that is not
+  possible. Open it and sign in again.
 - **No devices after setup**: the account has no saved places yet. Add one on
   wxalerts.org and it appears within seconds.
 - **Alert entities unavailable for a place**: the place has no US county
@@ -276,13 +287,19 @@ Automations that pointed at 0.x entities need repointing: the new ids are
   client, which covers 17 distinct counties. A warning in the log names how
   many were left out.
 - **Diagnostics**: on the integration page, open the menu and choose
-  **Download diagnostics**. The username, password and place coordinates are
-  redacted.
+  **Download diagnostics**. The sign-in token, broker login, instance id and
+  place coordinates are redacted.
 
 ## How it connects
 
-One MQTT v5 connection over websockets to `wss://mqtt.wxalerts.org/mqtt`
-(port 443), signed in with your Home Assistant login. It subscribes to your
+Signing in is OAuth2 with PKCE against the wxalerts.org identity provider.
+With that sign-in the integration registers this Home Assistant instance at
+`api.wxalerts.org` and receives a broker login for it alone. If the broker
+ever rejects that login, the integration refreshes the sign-in and registers
+again before asking you for anything.
+
+The feed is one MQTT v5 connection over websockets to
+`wss://mqtt.wxalerts.org/mqtt` (port 443), using that login. It subscribes to your
 account's topics (`wxalerts/u/<username>/#`: places, storm cells and the
 feed status) and to the public alert tree of each county your places are in.
 Everything is retained, so every entity is correct the moment Home Assistant
@@ -299,8 +316,10 @@ WXALERTS_HA_USERNAME=ha-... WXALERTS_HA_PASSWORD=... \
 ```
 
 The default run fakes the MQTT transport, so it is deterministic and offline.
-`FeedClient` in `coordinator.py` is the whole MQTT surface; every topic name
-and payload field lives in the topic contract block of `const.py`.
+The live tests take a broker login created with the website's advanced
+"create credentials manually" option. `FeedClient` in `coordinator.py` is the
+whole MQTT surface and `api.py` the whole account API surface; every topic
+name, payload field, URL and the OAuth client id live in `const.py`.
 
 Leave `custom_components/wxalerts/brand/icon.png` where it is. Home Assistant
 2026.3 and later serve a custom integration's icon straight out of that
