@@ -84,6 +84,39 @@
       },
       "feed_age": {
         "name": "Feed age"
+      },
+      "temperature": {
+        "name": "Temperature"
+      },
+      "dew_point": {
+        "name": "Dew point"
+      },
+      "feels_like": {
+        "name": "Feels like"
+      },
+      "humidity": {
+        "name": "Humidity"
+      },
+      "wind_speed": {
+        "name": "Wind speed"
+      },
+      "wind_gust": {
+        "name": "Wind gust"
+      },
+      "wind_bearing": {
+        "name": "Wind bearing"
+      },
+      "pressure": {
+        "name": "Pressure"
+      },
+      "visibility": {
+        "name": "Visibility"
+      },
+      "precipitation_last_hour": {
+        "name": "Precipitation last hour"
+      },
+      "condition": {
+        "name": "Condition"
       }
     }
   },

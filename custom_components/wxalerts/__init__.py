@@ -27,6 +27,7 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
     Platform.SENSOR,
     Platform.GEO_LOCATION,
+    Platform.WEATHER,
 ]
 
 WxAlertsConfigEntry = ConfigEntry[WxAlertsCoordinator]

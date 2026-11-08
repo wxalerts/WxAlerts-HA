@@ -125,6 +125,28 @@ STORM_FIELDS: tuple[str, ...] = (
     STORM_UPDATED_AT,
 )
 
+# conditions/place/<place_id>: retained latest observation near the place;
+# nulls for anything the station did not report, empty message clears it.
+TOPIC_CONDITIONS_PLACE = "conditions/place"
+COND_STATION_ID = "station_id"
+COND_STATION_NAME = "station_name"
+COND_DISTANCE_KM = "distance_km"
+COND_OBSERVED_AT = "observed_at"
+COND_TEMPERATURE_C = "temperature_c"
+COND_DEWPOINT_C = "dewpoint_c"
+COND_HUMIDITY = "relative_humidity"
+COND_WIND_SPEED_KMH = "wind_speed_kmh"
+COND_WIND_GUST_KMH = "wind_gust_kmh"
+COND_WIND_DIRECTION_DEG = "wind_direction_deg"
+COND_PRESSURE_HPA = "pressure_hpa"
+COND_VISIBILITY_KM = "visibility_km"
+COND_CONDITION = "condition"
+COND_CONDITION_CODE = "condition_code"
+COND_FEELS_LIKE_C = "feels_like_c"
+COND_PRECIP_LAST_HOUR_MM = "precip_last_hour_mm"
+# An observation older than this makes the conditions entities unavailable.
+CONDITIONS_STALE_SECONDS = 7200
+
 EPISODE_OPEN = "open"
 EPISODE_ESCALATE = "escalate"
 EPISODE_UPDATE = "update"
@@ -200,6 +222,7 @@ EVENT_STORM_CELL = "wxalerts_storm_cell"
 
 SIGNAL_ALERTS_UPDATED = f"{DOMAIN}_alerts_updated"  # + _{entry_id}_{same}
 SIGNAL_STORMS_UPDATED = f"{DOMAIN}_storms_updated"  # + _{entry_id}_{place_id}
+SIGNAL_CONDITIONS_UPDATED = f"{DOMAIN}_conditions_updated"  # + _{entry_id}_{place_id}
 SIGNAL_PLACE_UPDATED = f"{DOMAIN}_place_updated"  # + _{entry_id}_{place_id}
 SIGNAL_CONNECTION = f"{DOMAIN}_connection"  # + _{entry_id}
 SIGNAL_TICK = f"{DOMAIN}_tick"  # + _{entry_id}

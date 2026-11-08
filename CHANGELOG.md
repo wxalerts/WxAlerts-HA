@@ -47,6 +47,13 @@ sign in to wxalerts.org. See *Upgrading from 0.x* in the README.
   cell ETA* (counts down between updates) and *Storm cell threat* (enum by
   rung), the `wxalerts_storm_cell` event on open and escalate, and matching
   device triggers. A storm that was never cleared expires after 30 minutes.
+- **Current conditions per place** from the retained
+  `wxalerts/u/<username>/conditions/place/<place_id>` topic: a `weather`
+  entity (current conditions, no forecast) and sensors for temperature, dew
+  point, feels like, humidity, wind speed, gust and bearing, pressure,
+  visibility, precipitation in the last hour and the condition text. Metric
+  native units, converted by Home Assistant. Unavailable when the observation
+  is over two hours old or missing.
 - **Feed age.** An account-wide *Feed age* sensor from the server's status
   heartbeat, and a *Connected* sensor. Storm cell entities go unavailable when
   the heartbeat is 15 minutes old or reports offline. A 30 second timer keeps

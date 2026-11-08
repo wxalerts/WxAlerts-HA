@@ -10,6 +10,11 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 
 from .const import (
+    COND_DISTANCE_KM,
+    COND_OBSERVED_AT,
+    COND_STATION_ID,
+    COND_STATION_NAME,
+    SIGNAL_CONDITIONS_UPDATED,
     SIGNAL_ALERTS_UPDATED,
     SIGNAL_CONNECTION,
     SIGNAL_PLACE_UPDATED,
@@ -52,6 +57,7 @@ class WxAlertsPlaceEntity(Entity):
     _listen_alerts = False
     _listen_storms = False
     _listen_tick = False
+    _listen_conditions = False
 
     def __init__(
         self, coordinator: WxAlertsCoordinator, place: Place, suffix: str
@@ -89,6 +95,8 @@ class WxAlertsPlaceEntity(Entity):
             signals.append(f"{SIGNAL_STORMS_UPDATED}_{entry_id}_{self.place_id}")
         if self._listen_tick:
             signals.append(f"{SIGNAL_TICK}_{entry_id}")
+        if self._listen_conditions:
+            signals.append(f"{SIGNAL_CONDITIONS_UPDATED}_{entry_id}_{self.place_id}")
         for signal in signals:
             self.async_on_remove(
                 async_dispatcher_connect(self.hass, signal, self._handle_update)
@@ -142,6 +150,35 @@ class WxAlertsStormEntity(WxAlertsPlaceEntity):
     @property
     def storm(self) -> dict[str, Any] | None:
         return self.coordinator.primary_storm(self.place_id)
+
+
+class WxAlertsConditionsEntity(WxAlertsPlaceEntity):
+    """A place entity reading the latest observation near the place.
+
+    Listens to the tick as well, so an observation crossing the two-hour
+    line goes unavailable with no new message arriving.
+    """
+
+    _listen_conditions = True
+    _listen_tick = True
+
+    @property
+    def observation(self) -> dict[str, Any] | None:
+        return self.coordinator.conditions_for(self.place_id)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.observation is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        observation = self.observation or {}
+        return {
+            "station_id": observation.get(COND_STATION_ID),
+            "station": observation.get(COND_STATION_NAME),
+            "distance_km": observation.get(COND_DISTANCE_KM),
+            "observed_at": observation.get(COND_OBSERVED_AT),
+        }
 
 
 class WxAlertsServiceEntity(Entity):

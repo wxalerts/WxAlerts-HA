@@ -36,6 +36,11 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.ssl import get_default_context
 
 from .const import (
+    COND_OBSERVED_AT,
+    COND_STATION_ID,
+    CONDITIONS_STALE_SECONDS,
+    SIGNAL_CONDITIONS_UPDATED,
+    TOPIC_CONDITIONS_PLACE,
     CONF_PLACES,
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -489,6 +494,8 @@ class WxAlertsCoordinator:
         # begins" trigger means.
         self._active_events: dict[str, set[str]] = {}
 
+        # Latest observation per place id.
+        self._conditions: dict[str, dict[str, Any]] = {}
         # Storm cells, keyed place id -> storm id -> payload.
         self._storms: dict[str, dict[str, dict[str, Any]]] = {}
         # When each storm was last heard from, for expiry when updated_at is
@@ -798,6 +805,10 @@ class WxAlertsCoordinator:
             self._handle_places(payload)
         elif rest == TOPIC_STATUS:
             self._handle_status(payload)
+        elif rest.startswith(TOPIC_CONDITIONS_PLACE + "/"):
+            place_id = rest[len(TOPIC_CONDITIONS_PLACE) + 1:]
+            if place_id and "/" not in place_id:
+                self._handle_conditions(place_id, payload)
         elif rest.startswith(TOPIC_STORMS_PLACE + "/"):
             tail = rest[len(TOPIC_STORMS_PLACE) + 1:].split("/")
             if len(tail) == 2 and all(tail):
@@ -863,6 +874,7 @@ class WxAlertsCoordinator:
         entry_id = self.entry.entry_id
         for place_id in removed:
             self._forget_place_storms(place_id)
+            self._conditions.pop(place_id, None)
         if new:
             self._remove_stale_place_devices(set(new))
         for place in changed:
@@ -1032,6 +1044,40 @@ class WxAlertsCoordinator:
             # No heartbeat heard yet: trust the connection.
             return True
         return age <= STATUS_STALE_SECONDS
+
+    # ===========================================================================
+    # Current conditions
+    # ===========================================================================
+
+    def _handle_conditions(self, place_id: str, payload: bytes) -> None:
+        if not payload:
+            self._conditions.pop(place_id, None)
+        else:
+            try:
+                observation = json.loads(payload)
+            except ValueError:
+                _LOGGER.warning("Undecodable conditions payload for place %s", place_id)
+                return
+            if not isinstance(observation, dict):
+                return
+            self._conditions[place_id] = observation
+        async_dispatcher_send(
+            self.hass, f"{SIGNAL_CONDITIONS_UPDATED}_{self.entry.entry_id}_{place_id}"
+        )
+
+    def conditions_for(self, place_id: str) -> dict[str, Any] | None:
+        """The place's latest observation, or None if missing or stale.
+
+        Two hours is the cut-off: an old reading presented as current is
+        worse than an honest unavailable.
+        """
+        observation = self._conditions.get(place_id)
+        if not observation:
+            return None
+        observed = _parse_time(observation.get(COND_OBSERVED_AT))
+        if observed is None or time.time() - observed > CONDITIONS_STALE_SECONDS:
+            return None
+        return observation
 
     # ===========================================================================
     # Storm cells
@@ -1350,6 +1396,14 @@ class WxAlertsCoordinator:
                 ]
                 for place_id in self._storms
                 if self._storms[place_id]
+            },
+            "conditions_per_place": {
+                place_id: {
+                    "station_id": obs.get(COND_STATION_ID),
+                    "observed_at": obs.get(COND_OBSERVED_AT),
+                    "fresh": self.conditions_for(place_id) is not None,
+                }
+                for place_id, obs in self._conditions.items()
             },
             "feed_online": self._status_online,
             "feed_age_seconds": None

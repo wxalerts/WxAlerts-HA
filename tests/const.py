@@ -229,3 +229,33 @@ def registration(username: str = USERNAME, password: str = PASSWORD) -> dict:
         "tls": True,
         "topic_prefix": f"wxalerts/u/{username}/",
     }
+
+
+def conditions_topic(place_id) -> str:
+    return f"{PREFIX}conditions/place/{place_id}"
+
+
+def conditions(age_seconds: float = 300.0, **overrides) -> dict:
+    """A current-conditions message in the contract's shape."""
+    observed = datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() - age_seconds, tz=timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "station_id": "KNDZ",
+        "station_name": "Whiting Field",
+        "distance_km": 9.4,
+        "observed_at": observed,
+        "temperature_c": 24.4,
+        "dewpoint_c": 21.1,
+        "relative_humidity": 82,
+        "wind_speed_kmh": 18.5,
+        "wind_gust_kmh": 33.3,
+        "wind_direction_deg": 200,
+        "pressure_hpa": 1012.9,
+        "visibility_km": 16.09,
+        "condition": "Light Rain",
+        "condition_code": "rain",
+        "feels_like_c": 25.6,
+        "precip_last_hour_mm": 1.3,
+        **overrides,
+    }

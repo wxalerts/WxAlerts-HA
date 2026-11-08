@@ -12,14 +12,37 @@ from typing import Any
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
+    SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.const import (
+    DEGREE,
+    PERCENTAGE,
+    EntityCategory,
+    UnitOfLength,
+    UnitOfPrecipitationDepth,
+    UnitOfPressure,
+    UnitOfSpeed,
+    UnitOfTemperature,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import WxAlertsConfigEntry
 from .const import (
+    COND_CONDITION,
+    COND_CONDITION_CODE,
+    COND_DEWPOINT_C,
+    COND_FEELS_LIKE_C,
+    COND_HUMIDITY,
+    COND_PRECIP_LAST_HOUR_MM,
+    COND_PRESSURE_HPA,
+    COND_TEMPERATURE_C,
+    COND_VISIBILITY_KM,
+    COND_WIND_DIRECTION_DEG,
+    COND_WIND_GUST_KMH,
+    COND_WIND_SPEED_KMH,
     SEVERITY_NONE,
     SEVERITY_ORDER,
     STORM_ID,
@@ -29,8 +52,63 @@ from .const import (
     THREAT_OPTIONS,
 )
 from .coordinator import Place, WxAlertsCoordinator, threat_for_rung
-from .entity import WxAlertsAlertEntity, WxAlertsServiceEntity, WxAlertsStormEntity
+from .entity import (
+    WxAlertsAlertEntity,
+    WxAlertsConditionsEntity,
+    WxAlertsServiceEntity,
+    WxAlertsStormEntity,
+)
 from .events import event_key_for, event_name_for
+
+
+# Wind direction got its own device and state class in recent releases; on an
+# older Home Assistant the sensor is a plain degrees reading.
+_WIND_DIRECTION = getattr(SensorDeviceClass, "WIND_DIRECTION", None)
+_MEASUREMENT_ANGLE = getattr(SensorStateClass, "MEASUREMENT_ANGLE", None)
+
+
+def _measurement(
+    key: str,
+    field: str,
+    device_class: SensorDeviceClass | None,
+    unit: str,
+    precision: int,
+    state_class: SensorStateClass | None = SensorStateClass.MEASUREMENT,
+) -> SensorEntityDescription:
+    # The field rides in the description's key and the translation key is the
+    # entity's name; native units are metric and Home Assistant converts.
+    return SensorEntityDescription(
+        key=field,
+        translation_key=key,
+        device_class=device_class,
+        native_unit_of_measurement=unit,
+        state_class=state_class,
+        suggested_display_precision=precision,
+    )
+
+
+CONDITION_SENSORS: tuple[SensorEntityDescription, ...] = (
+    _measurement("temperature", COND_TEMPERATURE_C, SensorDeviceClass.TEMPERATURE,
+                 UnitOfTemperature.CELSIUS, 1),
+    _measurement("dew_point", COND_DEWPOINT_C, SensorDeviceClass.TEMPERATURE,
+                 UnitOfTemperature.CELSIUS, 1),
+    _measurement("feels_like", COND_FEELS_LIKE_C, SensorDeviceClass.TEMPERATURE,
+                 UnitOfTemperature.CELSIUS, 1),
+    _measurement("humidity", COND_HUMIDITY, SensorDeviceClass.HUMIDITY,
+                 PERCENTAGE, 0),
+    _measurement("wind_speed", COND_WIND_SPEED_KMH, SensorDeviceClass.WIND_SPEED,
+                 UnitOfSpeed.KILOMETERS_PER_HOUR, 0),
+    _measurement("wind_gust", COND_WIND_GUST_KMH, SensorDeviceClass.WIND_SPEED,
+                 UnitOfSpeed.KILOMETERS_PER_HOUR, 0),
+    _measurement("wind_bearing", COND_WIND_DIRECTION_DEG, _WIND_DIRECTION,
+                 DEGREE, 0, _MEASUREMENT_ANGLE),
+    _measurement("pressure", COND_PRESSURE_HPA, SensorDeviceClass.ATMOSPHERIC_PRESSURE,
+                 UnitOfPressure.HPA, 1),
+    _measurement("visibility", COND_VISIBILITY_KM, SensorDeviceClass.DISTANCE,
+                 UnitOfLength.KILOMETERS, 1),
+    _measurement("precipitation_last_hour", COND_PRECIP_LAST_HOUR_MM,
+                 SensorDeviceClass.PRECIPITATION, UnitOfPrecipitationDepth.MILLIMETERS, 1),
+)
 
 
 async def async_setup_entry(
@@ -48,6 +126,11 @@ async def async_setup_entry(
             entities.append(TopAlertSensor(coordinator, place))
             entities.append(StormEtaSensor(coordinator, place))
             entities.append(StormThreatSensor(coordinator, place))
+            entities.extend(
+                ConditionSensor(coordinator, place, description)
+                for description in CONDITION_SENSORS
+            )
+            entities.append(ConditionTextSensor(coordinator, place))
         return entities
 
     @callback
@@ -239,3 +322,51 @@ class FeedAgeSensor(WxAlertsServiceEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"online": self.coordinator.feed_online}
+
+
+class ConditionSensor(WxAlertsConditionsEntity, SensorEntity):
+    """One field of the latest observation near the place."""
+
+    def __init__(
+        self,
+        coordinator: WxAlertsCoordinator,
+        place: Place,
+        description: SensorEntityDescription,
+    ) -> None:
+        super().__init__(coordinator, place, f"conditions_{description.translation_key}")
+        self.entity_description = description
+
+    @property
+    def native_value(self) -> float | None:
+        value = (self.observation or {}).get(self.entity_description.key)
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+
+class ConditionTextSensor(WxAlertsConditionsEntity, SensorEntity):
+    """The observed weather in words, with the stable code beside it.
+
+    Text rather than an enum: stations report a long tail of phrasings and an
+    unlisted one must not become an invalid state.
+    """
+
+    _attr_translation_key = "condition"
+    _attr_icon = "mdi:weather-partly-cloudy"
+
+    def __init__(self, coordinator: WxAlertsCoordinator, place: Place) -> None:
+        super().__init__(coordinator, place, "conditions_condition")
+
+    @property
+    def native_value(self) -> str | None:
+        return (self.observation or {}).get(COND_CONDITION)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            **super().extra_state_attributes,
+            "condition_code": (self.observation or {}).get(COND_CONDITION_CODE),
+        }

@@ -31,6 +31,9 @@ Each place gets:
 - **Storm cell alerts**: when a storm cell's forecast path threatens the
   place, a safety sensor turns on with the cell's arrival time, threat rung,
   probabilities, speed, bearing and distance.
+- **Current conditions** from the nearest observing station: temperature,
+  dew point, feels like, humidity, wind, pressure, visibility, rain in the
+  last hour, and a `weather` entity.
 - **Device triggers** for every NWS alert type and for storm cell episodes,
   ready in the automation editor with nothing to configure.
 
@@ -107,6 +110,20 @@ Entity ids below are for a place named Home.
   warnings that can harm someone asleep: Tornado, Severe Thunderstorm, Flash
   Flood, Extreme Wind, Hurricane, Blizzard, Ice Storm, Snow Squall and
   Tsunami.
+
+Current conditions, from the observing station nearest the place:
+
+- `weather.wxalerts_home`: current conditions (no forecast), with
+  `station`, `station_id`, `distance_km` and `observed_at` attributes.
+- `sensor.wxalerts_home_temperature`, `_dew_point`, `_feels_like`,
+  `_humidity`, `_wind_speed`, `_wind_gust`, `_wind_bearing`, `_pressure`,
+  `_visibility` and `_precipitation_last_hour`: proper device classes, so
+  Home Assistant shows them in your unit system and keeps statistics.
+- `sensor.wxalerts_home_condition`: the observed weather in words, with the
+  stable `condition_code` as an attribute.
+
+These are unavailable when the latest observation is more than two hours old
+or missing, and a reading the station did not report is unknown.
 
 When several storm cells threaten one place, the one with the highest rung
 drives these entities, and the soonest arrival breaks a tie.
@@ -324,8 +341,8 @@ a revoke or a plan change reaches Home Assistant.
 
 The feed is one MQTT v5 connection over websockets to
 `wss://mqtt.wxalerts.org/mqtt` (port 443), using that login. It subscribes to your
-account's topics (`wxalerts/u/<username>/#`: places, storm cells and the
-feed status) and to the public alert tree of each county your places are in.
+account's topics (`wxalerts/u/<username>/#`: places, storm cells, current
+conditions and the feed status) and to the public alert tree of each county your places are in.
 Everything is retained, so every entity is correct the moment Home Assistant
 starts, with no polling.
 
