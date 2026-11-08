@@ -5,144 +5,162 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.core import callback
-from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 
 from .const import (
-    DOMAIN,
-    LOC_NAME,
-    LOC_SAME,
-    LOC_ZONE_ENTITY,
     SIGNAL_ALERTS_UPDATED,
     SIGNAL_CONNECTION,
-    SIGNAL_GLM_UPDATED,
+    SIGNAL_PLACE_UPDATED,
+    SIGNAL_STORMS_UPDATED,
+    SIGNAL_TICK,
 )
-from .coordinator import WxAlertsCoordinator
-from .lightning import Target
+from .coordinator import (
+    Place,
+    WxAlertsCoordinator,
+    place_device_identifier,
+    service_device_identifier,
+)
+
+MANUFACTURER = "WxAlerts.org"
 
 
-class WxAlertsLocationEntity(Entity):
-    """Base entity tied to one configured location (one HA zone).
+class WxAlertsPlaceEntity(Entity):
+    """Base entity tied to one WxAlerts place.
 
-    Wires up the relevant dispatcher signals; subclasses only implement
-    state properties reading from the coordinator.
+    Holds the place id, never the place itself: the places list is republished
+    whenever the person edits it, and an entity reading a stale copy would keep
+    alerting for a county the place has moved out of.
     """
 
     _attr_should_poll = False
     _attr_has_entity_name = True
+    # Which coordinator signals wake this entity, beyond the connection state.
+    _listen_alerts = False
+    _listen_storms = False
+    _listen_tick = False
 
     def __init__(
-        self, coordinator: WxAlertsCoordinator, location: dict[str, Any]
+        self, coordinator: WxAlertsCoordinator, place: Place, suffix: str
     ) -> None:
         self.coordinator = coordinator
-        self.location = location
-        self.same: str | None = location.get(LOC_SAME)
-
+        self.place_id = place.id
         entry_id = coordinator.entry.entry_id
-        # Counties group zones onto one device. A zone with no county falls
-        # back to its zone id rather than its geohash prefix, which would move
-        # the whole device whenever the lightning box size changed.
-        device_key = (
-            self.same
-            or location.get(LOC_ZONE_ENTITY)
-            or location.get(LOC_NAME, "unknown")
-        )
+        self._attr_unique_id = f"{entry_id}_place_{place.id}_{suffix}"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{entry_id}_{device_key}")},
-            name=f"WxAlerts {location.get(LOC_NAME)}",
-            manufacturer="WxAlerts.org",
-            model="NWS alert & GLM lightning feed",
+            identifiers={place_device_identifier(entry_id, place.id)},
+            name=f"WxAlerts {place.name}",
+            manufacturer=MANUFACTURER,
+            model="Place",
+            entry_type=DeviceEntryType.SERVICE,
             configuration_url="https://wxalerts.org",
         )
 
     @property
+    def place(self) -> Place | None:
+        return self.coordinator.place(self.place_id)
+
+    @property
+    def same(self) -> str | None:
+        place = self.place
+        return place.same if place else None
+
+    @property
     def available(self) -> bool:
-        return self.coordinator.connected
+        return self.coordinator.connected and self.place is not None
 
     async def async_added_to_hass(self) -> None:
         entry_id = self.coordinator.entry.entry_id
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{SIGNAL_CONNECTION}_{entry_id}",
-                self._handle_update,
+        signals = [
+            f"{SIGNAL_CONNECTION}_{entry_id}",
+            f"{SIGNAL_PLACE_UPDATED}_{entry_id}_{self.place_id}",
+        ]
+        if self._listen_storms:
+            signals.append(f"{SIGNAL_STORMS_UPDATED}_{entry_id}_{self.place_id}")
+        if self._listen_tick:
+            signals.append(f"{SIGNAL_TICK}_{entry_id}")
+        for signal in signals:
+            self.async_on_remove(
+                async_dispatcher_connect(self.hass, signal, self._handle_update)
             )
-        )
-        if self.same:
+        if self._listen_alerts:
             self.async_on_remove(
                 async_dispatcher_connect(
                     self.hass,
-                    f"{SIGNAL_ALERTS_UPDATED}_{entry_id}_{self.same}",
-                    self._handle_update,
+                    f"{SIGNAL_ALERTS_UPDATED}_{entry_id}",
+                    self._handle_alerts,
                 )
             )
+
+    @callback
+    def _handle_alerts(self, same: str) -> None:
+        # One signal for every county; the place's county is read at the moment
+        # of the update, so a place whose county changed follows it.
+        if same == self.same:
+            self.async_write_ha_state()
+
     @callback
     def _handle_update(self, *_args: Any) -> None:
         # Must be a callback: the dispatcher runs an undecorated sync target
         # in an executor thread, and async_write_ha_state from a thread is a
-        # hard error — every entity would stay stuck at its initial state.
+        # hard error.
         self.async_write_ha_state()
 
 
-class WxAlertsTargetEntity(Entity):
-    """Base entity for lightning proximity, tied to one target.
+class WxAlertsAlertEntity(WxAlertsPlaceEntity):
+    """A place entity driven by NWS alerts for the place's county."""
 
-    A target is a zone or a tracked person, so this cannot hang off the county
-    device the alert entities share — two people in one county need separate
-    devices, and a person is not in a fixed county at all.
+    _listen_alerts = True
 
-    The device is named ``Lightning — <name>`` deliberately: Home Assistant
-    builds entity ids from the device and entity names together, so this
-    produces ``sensor.lightning_home_nearest_strike`` and friends, matching what
-    a dashboard built against the standalone proximity service already points
-    at.
-    """
+    @property
+    def available(self) -> bool:
+        # A place with no county has no alert feed behind it. Unavailable says
+        # that honestly; "off" would claim the county is quiet.
+        return super().available and self.same is not None
+
+
+class WxAlertsStormEntity(WxAlertsPlaceEntity):
+    """A place entity driven by the place's storm cell topics."""
+
+    _listen_storms = True
+    _listen_tick = True
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.storms_available and self.place is not None
+
+    @property
+    def storm(self) -> dict[str, Any] | None:
+        return self.coordinator.primary_storm(self.place_id)
+
+
+class WxAlertsServiceEntity(Entity):
+    """Account-wide entities: the feed itself, not any one place."""
 
     _attr_should_poll = False
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
+    def __init__(self, coordinator: WxAlertsCoordinator, suffix: str) -> None:
         self.coordinator = coordinator
-        self.target_key = target.key
-        self._target_name = target.name
-
         entry_id = coordinator.entry.entry_id
+        self._attr_unique_id = f"{entry_id}_service_{suffix}"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{entry_id}_lightning_{target.key}")},
-            name=f"Lightning — {target.name}",
-            manufacturer="WxAlerts.org",
-            model="GOES GLM proximity",
-            configuration_url="https://wxalerts.org",
+            identifiers={service_device_identifier(entry_id)},
+            name="WxAlerts",
+            manufacturer=MANUFACTURER,
+            model="Feed",
+            entry_type=DeviceEntryType.SERVICE,
+            configuration_url="https://wxalerts.org/account/",
         )
-
-    @property
-    def target(self) -> Target | None:
-        return self.coordinator.target(self.target_key)
-
-    @property
-    def metrics(self):
-        return self.coordinator.metrics_for(self.target_key)
-
-    @property
-    def available(self) -> bool:
-        # A target that has gone away (a person who lost their fix) is
-        # unavailable rather than frozen at its last position.
-        return self.coordinator.glm_available and self.target is not None
 
     async def async_added_to_hass(self) -> None:
         entry_id = self.coordinator.entry.entry_id
-        for signal in (
-            f"{SIGNAL_CONNECTION}_{entry_id}",
-            f"{SIGNAL_GLM_UPDATED}_{entry_id}_{self.target_key}",
-        ):
+        for signal in (f"{SIGNAL_CONNECTION}_{entry_id}", f"{SIGNAL_TICK}_{entry_id}"):
             self.async_on_remove(
                 async_dispatcher_connect(self.hass, signal, self._handle_update)
             )
 
     @callback
     def _handle_update(self, *_args: Any) -> None:
-        # Callback for the same reason the alert entities are: the dispatcher
-        # runs an undecorated sync target in an executor thread, and writing
-        # state from a thread is a hard error.
         self.async_write_ha_state()

@@ -1,7 +1,7 @@
 """The hazard catalogue: resolution, coverage and internal consistency.
 
 The catalogue is a lookup table, so the tests worth writing are the ones a
-table gets wrong — a hazard resolving to the wrong entry, a name the two feed
+table gets wrong, a hazard resolving to the wrong entry, a name the two feed
 paths spell differently landing in two places, and the table drifting out of
 step with what NWS actually publishes.
 """
@@ -27,11 +27,9 @@ from custom_components.wxalerts.events import (
 
 from .const import HEAT_ALERT, SEVERE_ALERT, TORNADO_ALERT
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Resolution
-# ---------------------------------------------------------------------------
-
-
+# ===========================================================================
 def test_the_captured_payloads_resolve():
     assert event_key_for(TORNADO_ALERT) == "tornado_warning"
     assert event_key_for(SEVERE_ALERT) == "severe_thunderstorm_warning"
@@ -63,7 +61,7 @@ def test_the_vtec_pair_beats_a_disagreeing_name():
 
 
 def test_a_cap_only_alert_resolves_by_name():
-    """No VTEC at all — the ingest publishes both fields as null for these."""
+    """No VTEC at all, the ingest publishes both fields as null for these."""
     alert = {
         "phenomena": None,
         "significance": None,
@@ -96,7 +94,7 @@ def test_codes_that_share_an_event_type(phenomena, significance, expected):
 
 
 def test_an_uncatalogued_hazard_still_gets_a_key():
-    """A product this table has never heard of has to stay reportable — it
+    """A product this table has never heard of has to stay reportable, it
     just cannot be selected in the options flow."""
     alert = {"phenomena": "XX", "significance": "Q", "event": "Sharknado Warning"}
     assert event_type_for(alert) is None
@@ -109,11 +107,9 @@ def test_an_alert_with_nothing_to_go_on():
     assert event_name_for({}) == "Unknown"
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Table consistency
-# ---------------------------------------------------------------------------
-
-
+# ===========================================================================
 def test_keys_are_unique():
     keys = [event.key for event in EVENT_TYPES]
     assert len(keys) == len(set(keys))
@@ -135,7 +131,7 @@ def test_every_phenomenon_the_feed_can_publish_is_mapped():
 
     The list is duplicated here rather than imported: nws-ingest is a separate
     repo that is not a dependency, and a copy that drifts is exactly what this
-    test is meant to catch — it fails when the ingest adds a phenomenon, which
+    test is meant to catch, it fails when the ingest adds a phenomenon, which
     is when someone has to decide what event type it belongs to.
     """
     published = {
@@ -152,7 +148,7 @@ def test_every_phenomenon_the_feed_can_publish_is_mapped():
 @pytest.fixture
 def allow_the_internet():
     """The HA harness pins every socket to 127.0.0.1, and the ``socket_enabled``
-    fixture does not lift the host restriction — only this does."""
+    fixture does not lift the host restriction, only this does."""
     pytest_socket._remove_restrictions()
     yield
 
@@ -162,8 +158,8 @@ def test_the_catalogue_covers_every_type_nws_publishes(allow_the_internet):
     """Against api.weather.gov, so the table cannot silently fall behind.
 
     Marked live because it is a network call: run with ``pytest -m live``.
-    A name NWS adds and this misses is not broken — it resolves to a slug and
-    still reports — but it cannot be picked in the options flow, which is the
+    A name NWS adds and this misses is not broken, it resolves to a slug and
+    still reports, but it cannot be picked in the options flow, which is the
     whole feature.
     """
     request = urllib.request.Request(
@@ -179,7 +175,7 @@ def test_the_catalogue_covers_every_type_nws_publishes(allow_the_internet):
 
 def test_the_test_product_resolves_under_either_spelling():
     """NWS's type list says "Test"; the products on the feed say "Test
-    Message". Caught by resolving every live hazard against the catalogue —
+    Message". Caught by resolving every live hazard against the catalogue -
     the type list alone would have missed it."""
     assert event_key_for({"event": "Test"}) == "test"
     assert event_key_for({"event": "Test Message"}) == "test"

@@ -17,7 +17,7 @@ def selected_event_keys(entry) -> list[str]:
 
     An entry from 0.3.x has no selection at all, only the boolean that switched
     the six phenomenon buckets on. Reading it as the default set means an
-    upgrade keeps working automations pointed at a tornado sensor — under a new
+    upgrade keeps working automations pointed at a tornado sensor, under a new
     entity id, because the hazard it reports is genuinely narrower than the
     bucket's, and silently rebinding a tornado automation to something that
     means something else would be worse than making the break visible.

@@ -1,9 +1,9 @@
-"""The NWS hazard catalogue — every alert type a user can automate on.
+"""The NWS hazard catalogue, every alert type a user can automate on.
 
 An automation wants to say "Tornado Warning", not "phenomenon TO". The two
 are not the same question: a Tornado Watch and a Tornado Warning share the
 phenomenon and mean entirely different things, so the unit of selection here
-is the **event type** — phenomenon *and* significance together.
+is the **event type**, phenomenon *and* significance together.
 
 Resolving an alert to one of these is deliberately two-pass:
 
@@ -13,7 +13,7 @@ Resolving an alert to one of these is deliberately two-pass:
    lands on Cold Weather Advisory alongside everyone else.
 2. **Name second.** CAP-only products (Special Weather Statement, Air Quality
    Alert, the civil-emergency set) never had VTEC, and the ingest publishes
-   ``phenomena``/``significance`` as null for them — see ``_publish_alert_row``
+   ``phenomena``/``significance`` as null for them, see ``_publish_alert_row``
    in nws-ingest. Those come straight from api.weather.gov and so carry the
    canonical event name.
 
@@ -26,7 +26,7 @@ the cases where a name is all we have.
 
 The catalogue is a superset of ``api.weather.gov/alerts/types``: it also keeps
 VTEC codes NWS has retired from that list but which offices can still issue.
-An event type absent from here is not dropped — it gets a slug of its own name
+An event type absent from here is not dropped, it gets a slug of its own name
 and still appears in the alert list; it simply cannot be picked in the options
 flow.
 """
@@ -62,14 +62,14 @@ def _e(name: str, *vtec: str, aliases: tuple[str, ...] = ()) -> EventType:
     return EventType(key=_key(name), name=name, vtec=pairs, aliases=aliases)
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # The catalogue
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Grouped by hazard family for review; the options flow sorts alphabetically,
 # which is how someone hunting for "blizzard" actually finds it.
 
 EVENT_TYPES: tuple[EventType, ...] = (
-    # --- Convective ------------------------------------------------------
+    # Convective
     _e("Tornado Warning", "TO.W"),
     _e("Tornado Watch", "TO.A"),
     _e("Severe Thunderstorm Warning", "SV.W"),
@@ -80,7 +80,7 @@ EVENT_TYPES: tuple[EventType, ...] = (
     _e("Special Weather Statement"),
     _e("Hazardous Weather Outlook"),
     _e("Short Term Forecast"),
-    # --- Flooding --------------------------------------------------------
+    # Flooding
     # FA and FL are both "Flood" to NWS and differ only in origin (areal vs
     # forecast point), so they fold together: an automation that wants to know
     # the house may flood does not care which office product said so.
@@ -93,7 +93,7 @@ EVENT_TYPES: tuple[EventType, ...] = (
     _e("Flood Statement", "FA.S", "FL.S"),
     _e("Hydrologic Outlook", "HY.O"),
     _e("Hydrologic Statement", "HY.S"),
-    # --- Winter ----------------------------------------------------------
+    # Winter
     _e("Blizzard Warning", "BZ.W"),
     _e("Blizzard Watch", "BZ.A"),
     _e("Winter Storm Warning", "WS.W"),
@@ -110,7 +110,7 @@ EVENT_TYPES: tuple[EventType, ...] = (
     _e("Freeze Watch", "FZ.A"),
     _e("Hard Freeze Warning", "HZ.W"),
     _e("Hard Freeze Watch", "HZ.A"),
-    # --- Heat and cold ---------------------------------------------------
+    # Heat and cold
     # NWS renamed the EH products to "Extreme Heat" in 2025 and retired the WC
     # (wind chill) family into EC and Cold Weather Advisory in 2024. Both old
     # codes still resolve here, so an office lagging the change is invisible to
@@ -121,12 +121,12 @@ EVENT_TYPES: tuple[EventType, ...] = (
     _e("Extreme Cold Warning", "EC.W", "WC.W", aliases=("Wind Chill Warning",)),
     _e("Extreme Cold Watch", "EC.A", "WC.A", aliases=("Wind Chill Watch",)),
     _e("Cold Weather Advisory", "WC.Y", aliases=("Wind Chill Advisory",)),
-    # --- Wind ------------------------------------------------------------
+    # Wind
     _e("High Wind Warning", "HW.W"),
     _e("High Wind Watch", "HW.A"),
     _e("Wind Advisory", "WI.Y"),
     _e("Lake Wind Advisory", "LW.Y"),
-    # --- Tropical --------------------------------------------------------
+    # Tropical
     _e("Hurricane Warning", "HU.W"),
     _e("Hurricane Watch", "HU.A"),
     _e("Hurricane Force Wind Warning", "HF.W"),
@@ -138,7 +138,7 @@ EVENT_TYPES: tuple[EventType, ...] = (
     _e("Tropical Cyclone Local Statement", "HU.S", "TR.S", "TY.S"),
     _e("Storm Surge Warning", "SS.W"),
     _e("Storm Surge Watch", "SS.A"),
-    # --- Coastal and surf ------------------------------------------------
+    # Coastal and surf
     _e("Coastal Flood Warning", "CF.W"),
     _e("Coastal Flood Watch", "CF.A"),
     _e("Coastal Flood Advisory", "CF.Y"),
@@ -154,7 +154,7 @@ EVENT_TYPES: tuple[EventType, ...] = (
     _e("Tsunami Warning", "TS.W"),
     _e("Tsunami Watch", "TS.A"),
     _e("Tsunami Advisory", "TS.Y"),
-    # --- Marine ----------------------------------------------------------
+    # Marine
     _e("Special Marine Warning", "MA.W", aliases=("Marine Warning",)),
     _e("Marine Weather Statement", "MA.S", aliases=("Marine Statement",)),
     _e("Gale Warning", "GL.W"),
@@ -178,7 +178,7 @@ EVENT_TYPES: tuple[EventType, ...] = (
     _e("Marine Dense Smoke Advisory", "MS.Y"),
     _e("Marine Ashfall Advisory", "MH.Y"),
     _e("Marine Ashfall Warning", "MH.W"),
-    # --- Fire, smoke, dust, air ------------------------------------------
+    # Fire, smoke, dust, air
     _e("Red Flag Warning", "FW.W", aliases=("Fire Weather Warning",)),
     _e("Fire Weather Watch", "FW.A"),
     _e("Extreme Fire Danger"),
@@ -193,7 +193,7 @@ EVENT_TYPES: tuple[EventType, ...] = (
     _e("Dust Advisory"),
     _e("Air Stagnation Advisory", "AS.Y"),
     _e("Air Quality Alert"),
-    # --- Geophysical -----------------------------------------------------
+    # Geophysical
     _e("Ashfall Warning", "AF.W"),
     _e("Ashfall Advisory", "AF.Y"),
     _e("Volcano Warning"),
@@ -201,7 +201,7 @@ EVENT_TYPES: tuple[EventType, ...] = (
     _e("Avalanche Warning"),
     _e("Avalanche Watch"),
     _e("Avalanche Advisory"),
-    # --- Civil emergencies (CAP only, no VTEC) ---------------------------
+    # Civil emergencies (CAP only, no VTEC)
     _e("Civil Danger Warning"),
     _e("Civil Emergency Message"),
     _e("Evacuation Immediate"),
@@ -222,10 +222,9 @@ EVENT_TYPES: tuple[EventType, ...] = (
 )
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Lookups
-# ---------------------------------------------------------------------------
-
+# ===========================================================================
 BY_KEY: dict[str, EventType] = {event.key: event for event in EVENT_TYPES}
 
 
@@ -270,11 +269,9 @@ DEFAULT_EVENT_KEYS: tuple[str, ...] = (
 assert all(key in BY_KEY for key in DEFAULT_EVENT_KEYS)
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Resolution
-# ---------------------------------------------------------------------------
-
-
+# ===========================================================================
 def event_type_for(alert: Mapping[str, Any]) -> EventType | None:
     """The catalogue entry an alert belongs to, or None if it is not in it."""
     phenomena = alert.get("phenomena")
@@ -292,7 +289,7 @@ def event_type_for(alert: Mapping[str, Any]) -> EventType | None:
 def event_key_for(alert: Mapping[str, Any]) -> str:
     """A stable key for an alert, catalogued or not.
 
-    An uncatalogued hazard still needs an identity — it is what the active-alert
+    An uncatalogued hazard still needs an identity, it is what the active-alert
     list reports and what a start/end transition is measured on. Falling back to
     a slug of the name keeps a new NWS product working before this table knows
     about it; only the options selector is limited to the catalogue.

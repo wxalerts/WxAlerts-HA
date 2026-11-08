@@ -1,16 +1,15 @@
-"""Device triggers: every NWS event type, on every location, with no setup.
+"""Device triggers: every NWS event type, plus storm cell episodes, on every
+place, with no setup.
 
 The binary sensors cover what belongs on a dashboard or in a condition, but
 making all 122 event types available that way would mean 122 entities per
-county in the registry forever. A device trigger costs nothing until it is
-used, so the automation editor can offer the whole catalogue: pick the county
+place in the registry forever. A device trigger costs nothing until it is
+used, so the automation editor can offer the whole catalogue: pick the place
 device, pick "Tornado Warning begins", done.
 
-These fire off ``EVENT_HAZARD``, which the coordinator emits when an event
-TYPE starts or stops being in effect — not once per product. A second tornado
-warning for the same county while one is already live is a new alert but not a
-new hazard, and a trigger firing on it would announce a tornado that is already
-being announced.
+Hazard triggers fire off ``EVENT_HAZARD``, which the coordinator emits when an
+event TYPE starts or stops being in effect for a place, not once per product.
+Storm cell triggers fire off ``EVENT_STORM_CELL`` on open and escalate.
 """
 
 from __future__ import annotations
@@ -34,20 +33,32 @@ from homeassistant.helpers.trigger import TriggerActionType, TriggerInfo
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
+    CONF_PLACES,
     DOMAIN,
+    EPISODE_ESCALATE,
+    EPISODE_OPEN,
     EVENT_HAZARD,
+    EVENT_STORM_CELL,
     HAZARD_BEGIN,
     HAZARD_END,
-    LOC_SAME,
+    STORM_EPISODE,
+    STORM_PLACE_ID,
 )
+from .coordinator import Place, parse_places, place_device_identifier
 from .events import EVENT_TYPES
 
-# "<key>_begin" / "<key>_end" — one trigger type per catalogue entry per edge.
-TRIGGER_TYPES: set[str] = {
+# "<key>_begin" / "<key>_end": one trigger type per catalogue entry per edge.
+HAZARD_TRIGGER_TYPES: list[str] = [
     f"{event.key}_{edge}"
     for event in EVENT_TYPES
     for edge in (HAZARD_BEGIN, HAZARD_END)
+]
+# Storm cell episodes that fire EVENT_STORM_CELL.
+STORM_TRIGGER_TYPES: dict[str, str] = {
+    "storm_cell_open": EPISODE_OPEN,
+    "storm_cell_escalate": EPISODE_ESCALATE,
 }
+TRIGGER_TYPES: set[str] = {*HAZARD_TRIGGER_TYPES, *STORM_TRIGGER_TYPES}
 
 TRIGGER_SCHEMA = DEVICE_TRIGGER_BASE_SCHEMA.extend(
     {vol.Required(CONF_TYPE): vol.In(TRIGGER_TYPES)}
@@ -58,19 +69,17 @@ def _split(trigger_type: str) -> tuple[str, str]:
     """"tornado_warning_begin" -> ("tornado_warning", "begin").
 
     Split from the right, because catalogue keys contain underscores of their
-    own — "911_telephone_outage_begin" is not a key called "911".
+    own: "911_telephone_outage_begin" is not a key called "911".
     """
     key, _, edge = trigger_type.rpartition("_")
     return key, edge
 
 
-def _same_for_device(hass: HomeAssistant, device_id: str) -> str | None:
-    """The county code the device stands for.
+def _place_for_device(hass: HomeAssistant, device_id: str) -> Place | None:
+    """The place a device stands for, from the entry's cached places list.
 
-    Device identifiers are ``<entry_id>_<key>``, where the key is the SAME code
-    for any county device. Rather than parse that back out, the entry's own
-    locations are searched — the identifier format is an implementation detail
-    of the entity base class and should stay one.
+    Read from entry data rather than the running coordinator, so the
+    automation editor can list triggers even while the entry is not loaded.
     """
     device = dr.async_get(hass).async_get(device_id)
     if device is None:
@@ -79,31 +88,26 @@ def _same_for_device(hass: HomeAssistant, device_id: str) -> str | None:
         entry = hass.config_entries.async_get_entry(entry_id)
         if entry is None or entry.domain != DOMAIN:
             continue
-        options = {**entry.data, **entry.options}
-        for location in options.get("locations", []):
-            same = location.get(LOC_SAME)
-            if same and (DOMAIN, f"{entry_id}_{same}") in device.identifiers:
-                return same
+        places = parse_places(entry.data.get(CONF_PLACES)) or {}
+        for place in places.values():
+            if place_device_identifier(entry_id, place.id) in device.identifiers:
+                return place
     return None
 
 
 async def async_get_triggers(
     hass: HomeAssistant, device_id: str
 ) -> list[dict[str, Any]]:
-    """Offer the catalogue — but only on devices that receive alerts.
-
-    A lightning device, or a zone that resolved to no US county, has no county
-    feed behind it; listing hazard triggers there would offer automations that
-    can never fire.
-    """
-    if _same_for_device(hass, device_id) is None:
+    """Storm cell triggers on every place; hazard triggers where there is a
+    county feed behind the place, since elsewhere they could never fire."""
+    place = _place_for_device(hass, device_id)
+    if place is None:
         return []
     base = {CONF_PLATFORM: "device", CONF_DEVICE_ID: device_id, CONF_DOMAIN: DOMAIN}
-    return [
-        {**base, CONF_TYPE: f"{event.key}_{edge}"}
-        for event in EVENT_TYPES
-        for edge in (HAZARD_BEGIN, HAZARD_END)
-    ]
+    types = list(STORM_TRIGGER_TYPES)
+    if place.same:
+        types.extend(HAZARD_TRIGGER_TYPES)
+    return [{**base, CONF_TYPE: trigger_type} for trigger_type in types]
 
 
 async def async_attach_trigger(
@@ -112,27 +116,33 @@ async def async_attach_trigger(
     action: TriggerActionType,
     trigger_info: TriggerInfo,
 ) -> CALLBACK_TYPE:
-    """Listen for the one hazard transition this trigger describes."""
-    same = _same_for_device(hass, config[CONF_DEVICE_ID])
-    if same is None:
+    """Listen for the one transition this trigger describes."""
+    place = _place_for_device(hass, config[CONF_DEVICE_ID])
+    if place is None:
         raise HomeAssistantError(
-            "This WxAlerts device has no county feed, so hazard triggers "
-            "cannot fire for it"
+            "This WxAlerts device is not one of your places, so its triggers "
+            "cannot fire"
         )
-    event_type, edge = _split(config[CONF_TYPE])
+    trigger_type = config[CONF_TYPE]
+    if trigger_type in STORM_TRIGGER_TYPES:
+        event_type = EVENT_STORM_CELL
+        event_data = {
+            STORM_PLACE_ID: place.id,
+            STORM_EPISODE: STORM_TRIGGER_TYPES[trigger_type],
+        }
+    else:
+        key, edge = _split(trigger_type)
+        event_type = EVENT_HAZARD
+        event_data = {"place_id": place.id, "event_type": key, "action": edge}
 
     # Filtering in the event trigger's own data match, rather than in a
-    # callback here, keeps the whole thing inside HA's trigger machinery —
+    # callback here, keeps the whole thing inside HA's trigger machinery,
     # including the trace an automation shows when it fires.
     event_config = event_trigger.TRIGGER_SCHEMA(
         {
             event_trigger.CONF_PLATFORM: "event",
-            event_trigger.CONF_EVENT_TYPE: EVENT_HAZARD,
-            CONF_EVENT_DATA: {
-                "same": same,
-                "event_type": event_type,
-                "action": edge,
-            },
+            event_trigger.CONF_EVENT_TYPE: event_type,
+            CONF_EVENT_DATA: event_data,
         }
     )
     return await event_trigger.async_attach_trigger(

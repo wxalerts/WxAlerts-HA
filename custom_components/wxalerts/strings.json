@@ -2,50 +2,59 @@
   "config": {
     "step": {
       "user": {
-        "title": "WxAlerts",
-        "description": "Pick the Home Assistant zones to watch. Each zone is resolved to its county for NWS alerts and used as the centre of a lightning proximity ring.",
+        "title": "Connect your WxAlerts account",
+        "description": "Enter the Home Assistant login from wxalerts.org (Account, Home Assistant: {account_url}). Your places, their alerts and storm cells come from your account. Home Assistant needs the Supporter plan: {pricing_url}",
         "data": {
-          "zones": "Zones to watch",
-          "enable_alerts": "NWS alerts",
-          "enable_glm": "GLM lightning"
+          "username": "Username",
+          "password": "Password"
+        },
+        "data_description": {
+          "username": "Starts with ha-. Shown on wxalerts.org under Account, Home Assistant.",
+          "password": "Shown once when you create or rotate the login."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in to WxAlerts again",
+        "description": "WxAlerts needs the Home Assistant login from your account. If you are upgrading from 0.x, or rotated the password on wxalerts.org, enter the current login from Account, Home Assistant ({account_url}). Home Assistant needs the Supporter plan: {pricing_url}",
+        "data": {
+          "username": "Username",
+          "password": "Password"
         }
       }
     },
     "error": {
-      "no_zones": "Select at least one zone.",
-      "no_locations": "None of the selected zones have usable coordinates.",
-      "no_same_codes": "No selected zone resolved to a US county, so alerts cannot be delivered. Lightning-only setups should disable NWS alerts."
+      "invalid_auth": "That login did not work. Check the username and password on wxalerts.org under Account, Home Assistant, or rotate the password there. Home Assistant needs the Supporter plan. Supporters create this login on wxalerts.org under Account, Home Assistant. Upgrade at {pricing_url}",
+      "supporter_required": "Home Assistant needs the Supporter plan. Supporters create this login on wxalerts.org under Account, Home Assistant. Upgrade at {pricing_url}",
+      "cannot_connect": "Could not reach the WxAlerts broker (mqtt.wxalerts.org). Check your internet connection and try again.",
+      "unknown": "Something unexpected went wrong. Check the Home Assistant log for details."
     },
     "abort": {
-      "already_configured": "WxAlerts is already configured. Adjust zones in the integration options."
+      "already_configured": "WxAlerts is already set up.",
+      "single_instance_allowed": "WxAlerts is already set up. One account per Home Assistant.",
+      "reauth_successful": "Signed in again. WxAlerts is reconnecting."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "WxAlerts options",
-        "description": "Zones are re-resolved when you save. Pick the alert types you want as binary sensors; anything you leave out can still be automated on through this location's device triggers. Lightning is measured as a true radius around each target, not as a map box, so the ring is never clipped on one side.",
+        "description": "Pick the alert types you want as binary sensors on each place. Anything you leave out is still available as a device trigger on each place. Places are managed on wxalerts.org.",
         "data": {
-          "zones": "Zones to watch",
-          "enable_alerts": "NWS alerts",
-          "enable_glm": "GLM lightning",
-          "glm_radius_mi": "Lightning radius (miles) — the outer ring, and how far the feed subscription reaches",
-          "glm_alert_mi": "Seek-shelter distance (miles) — turns on the safety sensor",
-          "glm_window_minutes": "Lightning window (minutes)",
-          "glm_track_persons": "Also track people (every person with a GPS fix gets their own lightning device)",
-          "glm_backfill_url": "Lightning history URL (optional) — fills the window on startup instead of ramping from zero; leave blank to derive it from the feed host",
-          "event_sensors": "Alert types to create sensors for — every NWS event type is available here, and every one is also available as a device trigger without being selected"
+          "event_sensors": "Alert types to create sensors for"
         }
       }
-    },
-    "error": {
-      "no_locations": "None of the selected zones have usable coordinates."
     }
   },
   "entity": {
     "binary_sensor": {
       "active_alert": {
         "name": "Active alert"
+      },
+      "storm_cell_approaching": {
+        "name": "Storm cell approaching"
+      },
+      "connected": {
+        "name": "Connected"
       }
     },
     "sensor": {
@@ -55,20 +64,30 @@
       "alert_count": {
         "name": "Active alerts"
       },
-      "nearest_strike": {
-        "name": "Nearest strike"
-      },
-      "strike_rate": {
-        "name": "Strike rate"
-      },
-      "since_last_strike": {
-        "name": "Since last strike"
-      },
-      "lightning_trend": {
-        "name": "Trend"
-      },
       "top_alert": {
         "name": "Top alert"
+      },
+      "storm_cell_eta": {
+        "name": "Storm cell ETA"
+      },
+      "storm_cell_threat": {
+        "name": "Storm cell threat",
+        "state": {
+          "none": "None",
+          "wind_outlook": "Wind Outlook",
+          "high_wind_detected": "High Wind Detected",
+          "thunderstorm_outlook": "Thunderstorm Outlook",
+          "thunderstorm_risk": "Thunderstorm Risk",
+          "thunderstorm_detected": "Thunderstorm Detected",
+          "tornado_outlook": "Tornado Outlook",
+          "tornado_risk": "Tornado Risk",
+          "tornado_risk_high": "Tornado Risk (high)",
+          "tornado_detected": "Tornado Detected",
+          "tornado_confirmed": "Tornado Detected (confirmed)"
+        }
+      },
+      "feed_age": {
+        "name": "Feed age"
       }
     }
   },
@@ -317,7 +336,9 @@
       "winter_storm_watch_begin": "Winter Storm Watch begins",
       "winter_storm_watch_end": "Winter Storm Watch ends",
       "winter_weather_advisory_begin": "Winter Weather Advisory begins",
-      "winter_weather_advisory_end": "Winter Weather Advisory ends"
+      "winter_weather_advisory_end": "Winter Weather Advisory ends",
+      "storm_cell_open": "Storm cell approaching",
+      "storm_cell_escalate": "Storm cell threat escalates"
     }
   }
 }

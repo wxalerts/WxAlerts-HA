@@ -1,72 +1,50 @@
 """Config flow for the WxAlerts integration.
 
-The user picks Home Assistant zones; each zone's coordinates are resolved
-once — county SAME code via api.weather.gov (never polled at runtime) and a
-geohash computed locally for the GLM lightning tree.
+The user enters the Home Assistant broker login created on wxalerts.org
+(Account, Home Assistant). It is validated by connecting with it and
+subscribing to the account's own topics; places then come from the account.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
 
 from homeassistant.config_entries import (
+    ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.core import callback
 from homeassistant.helpers import selector
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
-    CONF_ENABLE_ALERTS,
-    CONF_ENABLE_GLM,
+    ACCOUNT_URL,
     CONF_EVENT_SENSORS,
-    CONF_GLM_ALERT,
-    CONF_GLM_BACKFILL,
-    CONF_GLM_PERSONS,
-    CONF_GLM_RADIUS,
-    CONF_GLM_WINDOW,
-    CONF_LOCATIONS,
-    CONF_ZONES,
-    DEFAULT_ENABLE_ALERTS,
-    DEFAULT_ENABLE_GLM,
-    DEFAULT_GLM_ALERT,
-    DEFAULT_GLM_BACKFILL,
-    DEFAULT_GLM_PERSONS,
-    DEFAULT_GLM_RADIUS,
-    DEFAULT_GLM_WINDOW,
+    CONF_PLACES,
+    CONFIG_VERSION,
     DOMAIN,
-    LOC_COUNTY,
-    LOC_GEOHASH,
-    LOC_LAT,
-    LOC_LON,
-    LOC_NAME,
-    LOC_SAME,
-    LOC_STATE,
-    LOC_ZONE_ENTITY,
-    NWS_POINTS_URL,
+    PRICING_URL,
+)
+from .coordinator import (
+    CannotConnect,
+    InvalidAuth,
+    SupporterRequired,
+    async_validate_login,
+    parse_places,
 )
 from .events import DEFAULT_EVENT_KEYS, SELECTABLE_EVENTS
-from .geo import geohash_encode, same_from_county_url
 from .options import selected_event_keys
 
 _LOGGER = logging.getLogger(__name__)
 
-_USER_AGENT = "WxAlerts-HA (github.com/wxalerts/WxAlerts-HA)"
-
-_ZONE_SELECTOR = selector.EntitySelector(
-    selector.EntitySelectorConfig(domain="zone", multiple=True)
-)
-
 # Every NWS event type, searchable. Sorted by name rather than grouped by
-# hazard family, because the box is a search box first: someone who wants a
-# blizzard sensor types "bliz", and a family grouping only helps the much rarer
-# case of browsing for something whose name you do not know.
+# hazard family, because the box is a search box first.
 _EVENT_SELECTOR = selector.SelectSelector(
     selector.SelectSelectorConfig(
         options=[
@@ -80,254 +58,143 @@ _EVENT_SELECTOR = selector.SelectSelector(
 )
 
 
-async def _resolve_zone(hass: HomeAssistant, zone_entity_id: str) -> dict[str, Any] | None:
-    """Turn a zone entity into a location record.
-
-    Returns None only when the zone has no usable coordinates. A zone that
-    resolves to no county (offshore, marine, outside the US) still gets a
-    geohash so lightning works; it just has no SAME code and thus no alerts.
-    """
-    state = hass.states.get(zone_entity_id)
-    if state is None:
-        return None
-    lat = state.attributes.get(ATTR_LATITUDE)
-    lon = state.attributes.get(ATTR_LONGITUDE)
-    if lat is None or lon is None:
-        return None
-
-    location: dict[str, Any] = {
-        LOC_ZONE_ENTITY: zone_entity_id,
-        LOC_NAME: state.name or zone_entity_id.split(".", 1)[-1],
-        LOC_LAT: lat,
-        LOC_LON: lon,
-        LOC_GEOHASH: geohash_encode(lat, lon, precision=5),
-        LOC_SAME: None,
-        LOC_COUNTY: None,
-        LOC_STATE: None,
-    }
-
-    session = async_get_clientsession(hass)
-    try:
-        resp = await session.get(
-            NWS_POINTS_URL.format(lat=round(lat, 4), lon=round(lon, 4)),
-            headers={"User-Agent": _USER_AGENT, "Accept": "application/geo+json"},
-            timeout=15,
-        )
-        if resp.status == 200:
-            data = await resp.json()
-            props = data.get("properties", {})
-            county_url = props.get("county")
-            if county_url:
-                location[LOC_SAME] = same_from_county_url(county_url)
-                location[LOC_COUNTY] = county_url.rstrip("/").rsplit("/", 1)[-1]
-            rel = props.get("relativeLocation", {}).get("properties", {})
-            location[LOC_STATE] = rel.get("state")
-        else:
-            _LOGGER.warning(
-                "api.weather.gov returned %s for %s; alerts unavailable for it",
-                resp.status,
-                zone_entity_id,
-            )
-    except Exception:  # noqa: BLE001 - offline flow should still allow GLM
-        _LOGGER.warning(
-            "Could not reach api.weather.gov to resolve %s; "
-            "lightning will work, alerts will not",
-            zone_entity_id,
-        )
-    return location
+def _login_schema(defaults: Mapping[str, Any]) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_USERNAME, default=defaults.get(CONF_USERNAME, "")
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(autocomplete="username")
+            ),
+            vol.Required(CONF_PASSWORD): selector.TextSelector(
+                selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.PASSWORD,
+                    autocomplete="current-password",
+                )
+            ),
+        }
+    )
 
 
-async def _resolve_zones(
-    hass: HomeAssistant, zone_entity_ids: list[str]
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Resolve every selected zone; return (locations, skipped_zone_ids)."""
-    locations: list[dict[str, Any]] = []
-    skipped: list[str] = []
-    for zone_entity_id in zone_entity_ids:
-        location = await _resolve_zone(hass, zone_entity_id)
-        if location is None:
-            skipped.append(zone_entity_id)
-        else:
-            locations.append(location)
-    return locations, skipped
-
-
-def _feature_schema(defaults: dict[str, Any]) -> dict:
-    return {
-        vol.Required(
-            CONF_ENABLE_ALERTS,
-            default=defaults.get(CONF_ENABLE_ALERTS, DEFAULT_ENABLE_ALERTS),
-        ): selector.BooleanSelector(),
-        vol.Required(
-            CONF_ENABLE_GLM,
-            default=defaults.get(CONF_ENABLE_GLM, DEFAULT_ENABLE_GLM),
-        ): selector.BooleanSelector(),
-    }
+_PLACEHOLDERS = {"pricing_url": PRICING_URL, "account_url": ACCOUNT_URL}
 
 
 class WxAlertsConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle the initial setup."""
+    """Handle setup and re-authentication."""
 
-    VERSION = 1
+    VERSION = CONFIG_VERSION
+    MINOR_VERSION = 1
+
+    async def _async_check(
+        self, user_input: dict[str, Any]
+    ) -> tuple[dict[str, str], list[dict[str, Any]] | None]:
+        """Validate a login. Returns (errors, places)."""
+        username = user_input[CONF_USERNAME].strip()
+        try:
+            places = await async_validate_login(
+                self.hass, username, user_input[CONF_PASSWORD]
+            )
+        except InvalidAuth:
+            return {"base": "invalid_auth"}, None
+        except SupporterRequired:
+            return {"base": "supporter_required"}, None
+        except CannotConnect:
+            return {"base": "cannot_connect"}, None
+        except Exception:  # noqa: BLE001 - surface anything else as unknown
+            _LOGGER.exception("Unexpected error validating the WxAlerts login")
+            return {"base": "unknown"}, None
+        return {}, places
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        # One entry per HA instance: one MQTT connection is the whole budget.
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
 
         errors: dict[str, str] = {}
         if user_input is not None:
-            zones: list[str] = user_input[CONF_ZONES]
-            if not zones:
-                errors["base"] = "no_zones"
-            else:
-                locations, skipped = await _resolve_zones(self.hass, zones)
-                if not locations:
-                    errors["base"] = "no_locations"
-                else:
-                    if skipped:
-                        _LOGGER.warning(
-                            "Skipped zones without coordinates: %s", skipped
-                        )
-                    if user_input[CONF_ENABLE_ALERTS] and not any(
-                        loc[LOC_SAME] for loc in locations
-                    ):
-                        errors["base"] = "no_same_codes"
-                if not errors:
-                    return self.async_create_entry(
-                        title="WxAlerts",
-                        data={
-                            CONF_ZONES: zones,
-                            CONF_LOCATIONS: locations,
-                            CONF_ENABLE_ALERTS: user_input[CONF_ENABLE_ALERTS],
-                            CONF_ENABLE_GLM: user_input[CONF_ENABLE_GLM],
-                            # Written explicitly rather than left to the
-                            # legacy fallback, so a fresh entry never depends
-                            # on a migration path to know what it selected.
-                            CONF_EVENT_SENSORS: list(DEFAULT_EVENT_KEYS),
-                        },
-                    )
+            errors, places = await self._async_check(user_input)
+            if not errors:
+                parsed = parse_places(places) or {}
+                return self.async_create_entry(
+                    title="WxAlerts",
+                    data={
+                        CONF_USERNAME: user_input[CONF_USERNAME].strip(),
+                        CONF_PASSWORD: user_input[CONF_PASSWORD],
+                        CONF_PLACES: [place.as_dict() for place in parsed.values()],
+                    },
+                    # Written explicitly so a fresh entry never depends on a
+                    # migration path to know what it selected.
+                    options={CONF_EVENT_SENSORS: list(DEFAULT_EVENT_KEYS)},
+                )
 
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_ZONES,
-                    default=(user_input or {}).get(CONF_ZONES, ["zone.home"]),
-                ): _ZONE_SELECTOR,
-                **_feature_schema(user_input or {}),
-            }
+        return self.async_show_form(
+            step_id="user",
+            data_schema=_login_schema(user_input or {}),
+            errors=errors,
+            description_placeholders=_PLACEHOLDERS,
         )
-        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """A rotated password, a lapsed plan, or an upgrade from 0.x."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            errors, places = await self._async_check(user_input)
+            if not errors:
+                updates: dict[str, Any] = {
+                    CONF_USERNAME: user_input[CONF_USERNAME].strip(),
+                    CONF_PASSWORD: user_input[CONF_PASSWORD],
+                }
+                parsed = parse_places(places)
+                if parsed is not None:
+                    updates[CONF_PLACES] = [p.as_dict() for p in parsed.values()]
+                return self.async_update_reload_and_abort(entry, data_updates=updates)
+
+        defaults = user_input or {CONF_USERNAME: entry.data.get(CONF_USERNAME, "")}
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=_login_schema(defaults),
+            errors=errors,
+            description_placeholders=_PLACEHOLDERS,
+        )
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry) -> WxAlertsOptionsFlow:
+    def async_get_options_flow(config_entry: ConfigEntry) -> WxAlertsOptionsFlow:
         return WxAlertsOptionsFlow()
 
 
 class WxAlertsOptionsFlow(OptionsFlow):
-    """Options: change zones, features, and lightning tuning.
+    """Options: which alert types get binary sensors.
 
-    Zones are re-resolved on save, so moving a zone or adding a county
-    never needs a remove/re-add of the integration.
-
-    The lightning settings are distances, not a geohash precision. The
-    subscription is derived from the radius rather than chosen by hand, because
-    the cell containing a location is aligned to the globe and not centred on
-    it — picking a box size by eye reliably leaves a blind arc on one side.
+    Places are edited on wxalerts.org and arrive on their own; there is
+    nothing about them to configure here.
     """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        entry = self.config_entry
-        current = {**entry.data, **entry.options}
-        errors: dict[str, str] = {}
-
         if user_input is not None:
-            locations, _skipped = await _resolve_zones(
-                self.hass, user_input[CONF_ZONES]
+            return self.async_create_entry(
+                title="",
+                data={CONF_EVENT_SENSORS: user_input.get(CONF_EVENT_SENSORS, [])},
             )
-            if not locations:
-                errors["base"] = "no_locations"
-            else:
-                return self.async_create_entry(
-                    title="",
-                    data={
-                        CONF_ZONES: user_input[CONF_ZONES],
-                        CONF_LOCATIONS: locations,
-                        CONF_ENABLE_ALERTS: user_input[CONF_ENABLE_ALERTS],
-                        CONF_ENABLE_GLM: user_input[CONF_ENABLE_GLM],
-                        CONF_GLM_RADIUS: user_input[CONF_GLM_RADIUS],
-                        CONF_GLM_ALERT: min(
-                            user_input[CONF_GLM_ALERT], user_input[CONF_GLM_RADIUS]
-                        ),
-                        CONF_GLM_WINDOW: user_input[CONF_GLM_WINDOW],
-                        CONF_GLM_PERSONS: user_input[CONF_GLM_PERSONS],
-                        CONF_GLM_BACKFILL: user_input.get(
-                            CONF_GLM_BACKFILL, DEFAULT_GLM_BACKFILL
-                        ).strip(),
-                        CONF_EVENT_SENSORS: user_input.get(
-                            CONF_EVENT_SENSORS, []
-                        ),
-                    },
-                )
 
         schema = vol.Schema(
             {
-                vol.Required(
-                    CONF_ZONES, default=current.get(CONF_ZONES, [])
-                ): _ZONE_SELECTOR,
-                **_feature_schema(current),
-                vol.Required(
-                    CONF_GLM_RADIUS,
-                    default=current.get(CONF_GLM_RADIUS, DEFAULT_GLM_RADIUS),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=5,
-                        max=50,
-                        step=5,
-                        unit_of_measurement="mi",
-                        mode=selector.NumberSelectorMode.SLIDER,
-                    )
-                ),
-                vol.Required(
-                    CONF_GLM_ALERT,
-                    default=current.get(CONF_GLM_ALERT, DEFAULT_GLM_ALERT),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=1,
-                        max=30,
-                        step=1,
-                        unit_of_measurement="mi",
-                        mode=selector.NumberSelectorMode.SLIDER,
-                    )
-                ),
-                vol.Required(
-                    CONF_GLM_WINDOW,
-                    default=current.get(CONF_GLM_WINDOW, DEFAULT_GLM_WINDOW),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=5, max=60, step=5, mode=selector.NumberSelectorMode.SLIDER
-                    )
-                ),
-                vol.Required(
-                    CONF_GLM_PERSONS,
-                    default=current.get(CONF_GLM_PERSONS, DEFAULT_GLM_PERSONS),
-                ): selector.BooleanSelector(),
-                vol.Optional(
-                    CONF_GLM_BACKFILL,
-                    default=current.get(CONF_GLM_BACKFILL, DEFAULT_GLM_BACKFILL),
-                ): selector.TextSelector(
-                    selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
-                ),
                 # Not vol.Required: an empty list is a legitimate answer
                 # (device triggers alone), and Required would reject it.
                 vol.Optional(
-                    CONF_EVENT_SENSORS, default=selected_event_keys(entry)
+                    CONF_EVENT_SENSORS, default=selected_event_keys(self.config_entry)
                 ): _EVENT_SELECTOR,
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+        return self.async_show_form(step_id="init", data_schema=schema)

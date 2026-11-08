@@ -1,18 +1,24 @@
-"""Sample payloads, captured from the live wxalerts feed.
+"""Sample payloads.
 
-The alert and lightning bodies below are real messages taken off
-``172.16.50.118:1883`` (the LAN face of the same broker the integration talks
-to over websockets), trimmed of their long ``description`` and geometry so the
-fixtures stay readable. Anything a test asserts on is verbatim.
+The alert bodies are real messages taken off the wxalerts broker, trimmed of
+their long ``description`` and geometry so the fixtures stay readable. The
+per-user places, status and storm cell bodies follow the shapes in the v1.0.0
+topic contract (Home Assistant v2 spec), since the server side is new.
 """
 
 from __future__ import annotations
 
 import json
-import time
+from datetime import datetime, timezone
 
-# --- Topics ---------------------------------------------------------------
+# Account
+USERNAME = "ha-k7x2q9mfw3"
+PASSWORD = "Wq8rT2zLp5"
+PREFIX = f"wxalerts/u/{USERNAME}/"
+TOPIC_PLACES = f"{PREFIX}places"
+TOPIC_STATUS = f"{PREFIX}status"
 
+# Topics
 SAME_SANTA_ROSA = "012113"  # Santa Rosa County, FL
 SAME_AUTAUGA = "001001"  # Autauga County, AL
 
@@ -20,11 +26,7 @@ TOPIC_TORNADO = f"wxalerts/nws/v1/same/{SAME_SANTA_ROSA}/0012"
 TOPIC_SEVERE = f"wxalerts/nws/v1/same/{SAME_SANTA_ROSA}/0044"
 TOPIC_HEAT = f"wxalerts/nws/v1/same/{SAME_AUTAUGA}/0008"
 
-# A leaf lightning cell inside geohash box "dj6" / "dj6n".
-TOPIC_GLM_LEAF = "wxalerts/glm/v1/d/j/6/n/7"
-
-# --- Alert payloads -------------------------------------------------------
-
+# Alert payloads
 TORNADO_ALERT: dict = {
     "id": 1234,
     "vtec": "KMOB.TO.W.0012.2026",
@@ -100,7 +102,7 @@ SEVERE_ALERT: dict = {
 }
 
 # Real capture: a Heat Advisory for Autauga County, AL (severity Moderate,
-# action CON — i.e. an update to a hazard already in effect).
+# action CON, i.e. an update to a hazard already in effect).
 HEAT_ALERT: dict = {
     "id": 255,
     "vtec": "KBMX.HT.Y.0008.2026",
@@ -126,95 +128,85 @@ HEAT_ALERT: dict = {
     "sources": ["api"],
 }
 
-# --- Lightning payload ----------------------------------------------------
-
-# Real capture, geohash rewritten to a cell inside the test's dj6 box.
-GLM_BURST: dict = {
-    "geohash": "dj6n7",
-    "satellite": "goes19",
-    "window_start": "2026-08-13T23:57:40+00:00",
-    "window_end": "2026-08-13T23:58:00+00:00",
-    "count": 2,
-    "flashes": [
-        {
-            "t": "2026-08-13T23:57:39.195468+00:00",
-            "lat": 30.6103,
-            "lon": -87.0547,
-            "energy_j": 1.21e-13,
-            "area_m2": 390000000.0,
-        },
-        {
-            "t": "2026-08-13T23:57:44.695584+00:00",
-            "lat": 30.6110,
-            "lon": -87.0530,
-            "energy_j": 3.28e-13,
-            "area_m2": 519000000.0,
-        },
-    ],
-}
-
-
-# The capture's own wall-clock, so a test can pretend to be standing in it and
-# exercise the verbatim payload against a window measured on flash time.
-GLM_BURST_EPOCH = 1786665464.695584
-
-
-def encode(payload: dict) -> bytes:
+def encode(payload) -> bytes:
     """JSON-encode a payload the way the broker delivers it."""
     return json.dumps(payload).encode()
 
 
-def fresh_burst(*, at: float | None = None, **flash_overrides) -> dict:
-    """``GLM_BURST`` restamped to now.
-
-    The captured timestamps are historical, and the rolling window is measured
-    against each flash's own time rather than when it arrived — so the verbatim
-    fixture is correctly discarded on sight. Proximity tests want flashes that
-    are actually live; the capture stays untouched for the parsing tests.
-    """
-    when = time.time() if at is None else at
-    return {
-        **GLM_BURST,
-        "flashes": [
-            {**flash, "t": when, **flash_overrides} for flash in GLM_BURST["flashes"]
-        ],
-    }
-
-
 TOMBSTONE = b""
 
-# --- Config entry data ----------------------------------------------------
-
-LOCATION_SANTA_ROSA = {
-    "zone_entity_id": "zone.home",
+# Places
+PLACE_HOME = {
+    "id": 101,
     "name": "Home",
-    "latitude": 30.6435,
-    "longitude": -87.0545,
+    "lat": 30.6435,
+    "lon": -87.0545,
     "same": SAME_SANTA_ROSA,
-    "county": "FLC113",
-    "state": "FL",
-    "geohash": "dj6n7",
 }
-
-LOCATION_AUTAUGA = {
-    "zone_entity_id": "zone.cabin",
+PLACE_CABIN = {
+    "id": 102,
     "name": "Cabin",
-    "latitude": 32.5361,
-    "longitude": -86.6435,
+    "lat": 32.5361,
+    "lon": -86.6435,
     "same": SAME_AUTAUGA,
-    "county": "ALC001",
-    "state": "AL",
-    "geohash": "djf3h",
 }
+# Offshore: no county, so storm cells only.
+PLACE_BOAT = {"id": 103, "name": "Boat", "lat": 29.0, "lon": -87.5}
+PLACES = [PLACE_HOME, PLACE_CABIN]
 
-# A zone outside any US county: lightning only, no SAME code.
-LOCATION_OFFSHORE = {
-    "zone_entity_id": "zone.boat",
-    "name": "Boat",
-    "latitude": 29.0,
-    "longitude": -87.5,
-    "same": None,
-    "county": None,
-    "state": None,
-    "geohash": "dj1ub",
-}
+# The same places as the entry caches them (ids as strings, same normalised).
+CACHED_PLACES = [
+    {"id": "101", "name": "Home", "lat": 30.6435, "lon": -87.0545, "same": SAME_SANTA_ROSA},
+    {"id": "102", "name": "Cabin", "lat": 32.5361, "lon": -86.6435, "same": SAME_AUTAUGA},
+]
+
+
+# Status and storm cells
+def iso_now(offset_seconds: float = 0.0) -> str:
+    return datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() + offset_seconds, tz=timezone.utc
+    ).isoformat()
+
+
+def status(online: bool = True, age_seconds: float = 0.0) -> dict:
+    return {"online": online, "updated_at": iso_now(-age_seconds)}
+
+
+STORM_ID = "ps-449120"
+
+
+def storm_topic(place_id, storm_id: str = STORM_ID) -> str:
+    return f"{PREFIX}storms/place/{place_id}/{storm_id}"
+
+
+def storm(
+    place_id=101,
+    *,
+    episode: str = "open",
+    rung: int = 40,
+    rung_label: str = "Thunderstorm Risk",
+    eta_min: float = 18.0,
+    storm_id: str = STORM_ID,
+    age_seconds: float = 0.0,
+    **overrides,
+) -> dict:
+    """A storm cell message in the contract's shape, stamped to now."""
+    return {
+        "storm_id": storm_id,
+        "place_id": place_id,
+        "place_name": "Home",
+        "episode": episode,
+        "eta_min": eta_min,
+        "rung": rung,
+        "rung_label": rung_label,
+        "prob_severe": 46,
+        "prob_tor": 3,
+        "prob_hail": 22,
+        "prob_wind": 41,
+        "speed_kmh": 52.0,
+        "bearing_deg": 245.0,
+        "distance_km": 15.6,
+        "issued_at": iso_now(-age_seconds - 120),
+        "updated_at": iso_now(-age_seconds),
+        **overrides,
+    }

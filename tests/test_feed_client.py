@@ -1,7 +1,7 @@
 """FeedClient: the MQTT transport.
 
 ``aiomqtt.Client`` is faked rather than dialled. What matters here is the
-behaviour the broker cares about — v5 over websockets, the right QoS per
+behaviour the broker cares about, v5 over websockets, the right QoS per
 topic, and above all a backoff that does not hot-loop, because every fresh
 subscription replays the entire retained set.
 """
@@ -13,6 +13,9 @@ from unittest.mock import MagicMock, patch
 
 import aiomqtt
 import pytest
+from aiomqtt.exceptions import MqttConnectError
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.reasoncodes import ReasonCode
 
 from custom_components.wxalerts.coordinator import (
     _BACKOFF_INITIAL,
@@ -23,7 +26,7 @@ from custom_components.wxalerts.coordinator import (
 
 SUBSCRIPTIONS = [
     ("wxalerts/nws/v1/same/012113/#", 1),
-    ("wxalerts/glm/v1/d/j/6/#", 0),
+    ("wxalerts/u/ha-abc123/#", 1),
 ]
 
 
@@ -132,14 +135,12 @@ async def run_feed(client: FeedClient, connections: int = 1) -> list[float]:
     return delays
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Connecting
-# ---------------------------------------------------------------------------
-
-
+# ===========================================================================
 async def test_connects_with_v5_over_websockets(fake_mqtt, collected):
     fake_mqtt.append([])
-    client = make_client(collected)
+    client = make_client(collected, username="ha-abc123", password="pw")
 
     await run_feed(client)
 
@@ -149,8 +150,8 @@ async def test_connects_with_v5_over_websockets(fake_mqtt, collected):
     assert kwargs["transport"] == "websockets"
     assert kwargs["websocket_path"] == "/mqtt"
     assert kwargs["protocol"] is aiomqtt.ProtocolVersion.V5
-    assert kwargs["username"] == "wxalerts"
-    assert kwargs["password"] == "wxalerts"
+    assert kwargs["username"] == "ha-abc123"
+    assert kwargs["password"] == "pw"
     assert kwargs["identifier"] == "wxha-test-0001"
     assert kwargs["tls_context"] is not None
 
@@ -265,11 +266,9 @@ async def test_a_failed_connection_never_reports_connected(fake_mqtt, collected)
     assert states == [False]
 
 
-# ---------------------------------------------------------------------------
-# Reconnection — "a reconnect loop is a bandwidth amplifier"
-# ---------------------------------------------------------------------------
-
-
+# ===========================================================================
+# Reconnection, "a reconnect loop is a bandwidth amplifier"
+# ===========================================================================
 async def test_backoff_grows_exponentially_and_never_hot_loops(fake_mqtt, collected):
     client = make_client(collected)
     for _ in range(6):
@@ -295,7 +294,7 @@ async def test_backoff_is_capped(fake_mqtt, collected):
 
 async def test_backoff_resets_after_a_stable_connection(fake_mqtt, collected):
     """A connection that held for hours and then dropped is not the broker
-    pushing back — the next attempt must not start at a five-minute wait.
+    pushing back, the next attempt must not start at a five-minute wait.
 
     The threshold is moved rather than the clock: ``time.monotonic`` is also
     the event loop's own clock, so faking it globally breaks the scheduler.
@@ -366,11 +365,9 @@ async def test_a_mid_stream_drop_is_retried(fake_mqtt, collected):
     assert len(FakeMqttClient.instances) == 2
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Lifecycle
-# ---------------------------------------------------------------------------
-
-
+# ===========================================================================
 async def test_stop_cancels_the_running_task(fake_mqtt, collected):
     """After an unload nothing may be left waiting to reconnect."""
     fake_mqtt.append([])
@@ -410,3 +407,54 @@ async def test_a_stopped_client_does_not_reconnect(fake_mqtt, collected):
     await client._run()
 
     assert len(FakeMqttClient.instances) == 1
+
+
+# ===========================================================================
+# Authentication
+# ===========================================================================
+@pytest.mark.parametrize(
+    "rc",
+    [
+        4,
+        5,
+        ReasonCode(PacketTypes.CONNACK, identifier=134),
+        ReasonCode(PacketTypes.CONNACK, identifier=135),
+    ],
+)
+async def test_a_rejected_login_stops_retrying_and_asks_for_reauth(
+    fake_mqtt, collected, rc
+):
+    """Hammering the broker with a rotated password only gets the client
+    banned; the loop stops and Home Assistant asks for the new one."""
+    fake_mqtt.append(MqttConnectError(rc))
+    auth_failures: list[bool] = []
+    client = FeedClient(
+        FeedConfig(client_id="wxha-test-0001", subscriptions=SUBSCRIPTIONS),
+        collected,
+        lambda _connected: None,
+        lambda: auth_failures.append(True),
+    )
+
+    delays = await run_feed(client, connections=3)
+
+    assert auth_failures == [True]
+    assert delays == []
+    assert len(FakeMqttClient.instances) == 1
+
+
+async def test_a_server_side_refusal_is_retried_not_treated_as_auth(
+    fake_mqtt, collected
+):
+    fake_mqtt.extend([MqttConnectError(3), []])
+    auth_failures: list[bool] = []
+    client = FeedClient(
+        FeedConfig(client_id="wxha-test-0001", subscriptions=SUBSCRIPTIONS),
+        collected,
+        lambda _connected: None,
+        lambda: auth_failures.append(True),
+    )
+
+    await run_feed(client, connections=2)
+
+    assert auth_failures == []
+    assert len(FakeMqttClient.instances) == 2

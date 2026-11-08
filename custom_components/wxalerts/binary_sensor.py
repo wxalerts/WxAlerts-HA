@@ -1,13 +1,6 @@
-"""Binary sensors: any-active-alert per county, one sensor per NWS event type
-the user selected, and the lightning proximity sensor a seek-shelter
-automation triggers on.
-
-Through 0.3.x these were six hardcoded phenomenon buckets, which collapsed the
-distinction the products exist to draw: a Tornado Watch and a Tornado Warning
-both turned on "Tornado alert", so an automation could not tell "conditions are
-favourable" from "take cover now". Selection is per event type now — the
-phenomenon and the significance together — and the catalogue covers every type
-NWS publishes.
+"""Binary sensors per place: any active alert, one sensor per NWS event type
+the user selected, and storm cell approaching. One account-wide sensor for the
+broker connection.
 """
 
 from __future__ import annotations
@@ -18,18 +11,32 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import WxAlertsConfigEntry
 from .const import (
-    LOC_COUNTY,
-    LOC_SAME,
+    STORM_BEARING_DEG,
+    STORM_DISTANCE_KM,
+    STORM_EPISODE,
+    STORM_ID,
+    STORM_PROB_HAIL,
+    STORM_PROB_SEVERE,
+    STORM_PROB_TOR,
+    STORM_PROB_WIND,
+    STORM_RUNG,
+    STORM_RUNG_LABEL,
+    STORM_SPEED_KMH,
+    STORM_UPDATED_AT,
 )
-from .coordinator import WxAlertsCoordinator
-from .entity import WxAlertsLocationEntity, WxAlertsTargetEntity
+from .coordinator import Place, WxAlertsCoordinator, threat_for_rung
+from .entity import (
+    WxAlertsAlertEntity,
+    WxAlertsServiceEntity,
+    WxAlertsStormEntity,
+)
 from .events import BY_KEY, EventType, event_name_for
-from .lightning import Target
 from .options import selected_event_keys
 
 # Only these carry the safety device class, which renders as Safe/Unsafe. A
@@ -41,59 +48,44 @@ _URGENT_SUFFIXES = ("Warning", "Emergency", "Immediate")
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: WxAlertsConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
-    entities: list[BinarySensorEntity] = []
-
-    if coordinator.enable_glm:
-        entities.extend(
-            LightningNearbyBinarySensor(coordinator, target)
-            for target in coordinator.targets
-        )
-
-        @callback
-        def _targets_added(targets: list[Target]) -> None:
-            async_add_entities(
-                LightningNearbyBinarySensor(coordinator, target) for target in targets
-            )
-
-        entry.async_on_unload(coordinator.add_target_listener(_targets_added))
-
-    if not coordinator.enable_alerts:
-        async_add_entities(entities)
-        return
-
     # Unknown keys are skipped rather than fatal: an options blob written by a
     # newer release must not stop the platform loading after a downgrade.
-    selected = [
-        BY_KEY[key] for key in selected_event_keys(entry) if key in BY_KEY
-    ]
+    selected = [BY_KEY[key] for key in selected_event_keys(entry) if key in BY_KEY]
 
-    seen_same: set[str] = set()
-    for location in coordinator.locations:
-        same = location.get(LOC_SAME)
-        if not same or same in seen_same:
-            continue
-        seen_same.add(same)
-        entities.append(ActiveAlertBinarySensor(coordinator, location))
-        entities.extend(
-            EventBinarySensor(coordinator, location, event) for event in selected
-        )
-    async_add_entities(entities)
+    def _for_places(places: list[Place]) -> list[BinarySensorEntity]:
+        entities: list[BinarySensorEntity] = []
+        for place in places:
+            entities.append(ActiveAlertBinarySensor(coordinator, place))
+            entities.extend(
+                EventBinarySensor(coordinator, place, event) for event in selected
+            )
+            entities.append(StormApproachingBinarySensor(coordinator, place))
+        return entities
+
+    @callback
+    def _places_added(places: list[Place]) -> None:
+        async_add_entities(_for_places(places))
+
+    entry.async_on_unload(coordinator.add_place_listener(_places_added))
+    async_add_entities(
+        [
+            ConnectedBinarySensor(coordinator),
+            *_for_places(list(coordinator.places.values())),
+        ]
+    )
 
 
-class ActiveAlertBinarySensor(WxAlertsLocationEntity, BinarySensorEntity):
-    """On when any hazard is live for this county."""
+class ActiveAlertBinarySensor(WxAlertsAlertEntity, BinarySensorEntity):
+    """On when any hazard is live for this place's county."""
 
     _attr_device_class = BinarySensorDeviceClass.SAFETY
     _attr_translation_key = "active_alert"
 
-    def __init__(
-        self, coordinator: WxAlertsCoordinator, location: dict[str, Any]
-    ) -> None:
-        super().__init__(coordinator, location)
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_{self.same}_active"
+    def __init__(self, coordinator: WxAlertsCoordinator, place: Place) -> None:
+        super().__init__(coordinator, place, "active")
 
     @property
     def is_on(self) -> bool:
@@ -103,32 +95,25 @@ class ActiveAlertBinarySensor(WxAlertsLocationEntity, BinarySensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         alerts = self.coordinator.alerts_for(self.same)
         return {
+            "place_id": self.place_id,
             "same": self.same,
-            "county_ugc": self.location.get(LOC_COUNTY),
             "alert_count": len(alerts),
             "events": [event_name_for(alert) for alert in alerts],
             "event_types": sorted(self.coordinator.active_event_keys(self.same)),
         }
 
 
-class EventBinarySensor(WxAlertsLocationEntity, BinarySensorEntity):
-    """On while one NWS event type is in effect for this county."""
+class EventBinarySensor(WxAlertsAlertEntity, BinarySensorEntity):
+    """On while one NWS event type is in effect for this place."""
 
     def __init__(
-        self,
-        coordinator: WxAlertsCoordinator,
-        location: dict[str, Any],
-        event: EventType,
+        self, coordinator: WxAlertsCoordinator, place: Place, event: EventType
     ) -> None:
-        super().__init__(coordinator, location)
+        # Keyed on the catalogue key, not the VTEC pair: several codes can fold
+        # into one type, and the entity has to survive the table gaining one.
+        super().__init__(coordinator, place, f"event_{event.key}")
         self._event = event
         self._attr_name = event.name
-        # Keyed on the catalogue key, not the VTEC pair: several codes can fold
-        # into one type (WC.W and EC.W are both Extreme Cold Warning), and the
-        # entity has to survive the table gaining another.
-        self._attr_unique_id = (
-            f"{coordinator.entry.entry_id}_{self.same}_event_{event.key}"
-        )
         if event.name.endswith(_URGENT_SUFFIXES):
             self._attr_device_class = BinarySensorDeviceClass.SAFETY
 
@@ -142,6 +127,7 @@ class EventBinarySensor(WxAlertsLocationEntity, BinarySensorEntity):
         return {
             "event_type": self._event.key,
             "event": self._event.name,
+            "place_id": self.place_id,
             "same": self.same,
             # Several live products for one type is normal, so the count is
             # reported rather than assumed to be one.
@@ -164,43 +150,59 @@ class EventBinarySensor(WxAlertsLocationEntity, BinarySensorEntity):
         }
 
 
-class LightningNearbyBinarySensor(WxAlertsTargetEntity, BinarySensorEntity):
-    """On when the closest flash is inside the alert radius.
+class StormApproachingBinarySensor(WxAlertsStormEntity, BinarySensorEntity):
+    """On while a storm cell threatens this place.
 
-    ``device_class: safety`` because this is the entity a seek-shelter
-    automation triggers on, and it is the reason the whole proximity set exists:
-    everything else on the lightning device is context for this one bit.
-
-    Automations should trigger ``from: "off"`` rather than on any change to on.
-    A stale feed makes this unavailable, so an ``unavailable -> on`` transition
-    means the feed recovered, not that the sky changed.
+    Automations should trigger ``from: "off"`` rather than on any change to
+    on: a stale feed makes this unavailable, so ``unavailable`` to ``on``
+    means the feed recovered, not that a new storm arrived.
     """
 
     _attr_device_class = BinarySensorDeviceClass.SAFETY
+    _attr_translation_key = "storm_cell_approaching"
 
-    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
-        super().__init__(coordinator, target)
-        alert = int(coordinator.glm_alert_mi)
-        self._attr_name = f"Lightning within {alert}mi"
-        # Identity is the target, never the radius: keying on the alert
-        # distance would orphan the sensor the first time it was tuned.
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_glm_{target.key}_nearby"
+    def __init__(self, coordinator: WxAlertsCoordinator, place: Place) -> None:
+        super().__init__(coordinator, place, "storm")
 
     @property
     def is_on(self) -> bool:
-        return self.metrics.nearby
+        return self.storm is not None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        metrics = self.metrics
+        storm = self.storm or {}
+        age = self.coordinator.feed_age
         return {
-            "target": self._target_name,
-            "alert_mi": self.coordinator.glm_alert_mi,
-            "nearest_mi": metrics.nearest_mi,
-            "trend": metrics.trend,
-            "feed_age_seconds": (
-                None
-                if self.coordinator.glm_feed_age is None
-                else round(self.coordinator.glm_feed_age)
-            ),
+            "place_id": self.place_id,
+            "storm_id": storm.get(STORM_ID),
+            "episode": storm.get(STORM_EPISODE),
+            "eta_min": self.coordinator.storm_eta(storm) if storm else None,
+            "rung": storm.get(STORM_RUNG),
+            "rung_label": storm.get(STORM_RUNG_LABEL),
+            "threat": threat_for_rung(storm.get(STORM_RUNG)),
+            "prob_severe": storm.get(STORM_PROB_SEVERE),
+            "prob_tor": storm.get(STORM_PROB_TOR),
+            "prob_hail": storm.get(STORM_PROB_HAIL),
+            "prob_wind": storm.get(STORM_PROB_WIND),
+            "speed_kmh": storm.get(STORM_SPEED_KMH),
+            "bearing_deg": storm.get(STORM_BEARING_DEG),
+            "distance_km": storm.get(STORM_DISTANCE_KM),
+            "updated_at": storm.get(STORM_UPDATED_AT),
+            "storm_count": len(self.coordinator.storms_for(self.place_id)),
+            "feed_age_seconds": None if age is None else round(age),
         }
+
+
+class ConnectedBinarySensor(WxAlertsServiceEntity, BinarySensorEntity):
+    """Whether the broker session is up."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "connected"
+
+    def __init__(self, coordinator: WxAlertsCoordinator) -> None:
+        super().__init__(coordinator, "connected")
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.connected

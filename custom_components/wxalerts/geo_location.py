@@ -2,6 +2,9 @@
 ``geo_location`` entities that appear with the hazard and vanish with its
 tombstone. The marker sits on the polygon centroid; the polygon itself is
 exposed as an attribute for anyone drawing the real shape.
+
+Markers are per hazard, not per place: two places in one county share the
+county's warnings, and drawing each warning twice would only clutter the map.
 """
 
 from __future__ import annotations
@@ -12,11 +15,11 @@ from homeassistant.components.geo_location import GeolocationEvent
 from homeassistant.const import UnitOfLength
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util.location import distance as location_distance
 
 from . import WxAlertsConfigEntry
-from .const import DOMAIN, LOC_SAME, SIGNAL_ALERTS_UPDATED
+from .const import DOMAIN, SIGNAL_ALERTS_UPDATED, TOPIC_ALERT_ROOT
 from .coordinator import WxAlertsCoordinator
 from .events import event_key_for, event_name_for
 from .geo import geometry_centroid
@@ -27,20 +30,10 @@ SOURCE = DOMAIN
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: WxAlertsConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    coordinator = entry.runtime_data
-    if not coordinator.enable_alerts:
-        return
-
-    seen_same: set[str] = set()
-    for location in coordinator.locations:
-        same = location.get(LOC_SAME)
-        if not same or same in seen_same:
-            continue
-        seen_same.add(same)
-        manager = AlertMarkerManager(hass, coordinator, same, async_add_entities)
-        entry.async_on_unload(manager.start())
+    manager = AlertMarkerManager(hass, entry.runtime_data, async_add_entities)
+    entry.async_on_unload(manager.start())
 
 
 class AlertMarkerManager:
@@ -51,29 +44,30 @@ class AlertMarkerManager:
         self,
         hass: HomeAssistant,
         coordinator: WxAlertsCoordinator,
-        same: str,
-        async_add_entities: AddEntitiesCallback,
+        async_add_entities: AddConfigEntryEntitiesCallback,
     ) -> None:
         self._hass = hass
         self._coordinator = coordinator
-        self._same = same
         self._async_add_entities = async_add_entities
         self._known_topics: set[str] = set()
 
     def start(self):
-        unsub = async_dispatcher_connect(
+        return async_dispatcher_connect(
             self._hass,
-            f"{SIGNAL_ALERTS_UPDATED}_{self._coordinator.entry.entry_id}_{self._same}",
+            f"{SIGNAL_ALERTS_UPDATED}_{self._coordinator.entry.entry_id}",
             self._sync,
         )
-        self._sync()
-        return unsub
 
     @callback
-    def _sync(self, *_args: Any) -> None:
-        current = self._coordinator.alert_topics_for(self._same)
+    def _sync(self, same: str) -> None:
+        current = self._coordinator.alert_topics_for(same)
+        prefix = f"{TOPIC_ALERT_ROOT}{same}/"
         # Entities for vanished topics remove themselves on the same signal.
-        self._known_topics.intersection_update(current)
+        self._known_topics = {
+            topic
+            for topic in self._known_topics
+            if not topic.startswith(prefix) or topic in current
+        }
         new_entities = []
         for topic, alert in current.items():
             if topic in self._known_topics:
@@ -82,9 +76,7 @@ class AlertMarkerManager:
             if centroid is None:
                 continue
             self._known_topics.add(topic)
-            new_entities.append(
-                AlertMarker(self._coordinator, self._same, topic, centroid)
-            )
+            new_entities.append(AlertMarker(self._coordinator, same, topic, centroid))
         if new_entities:
             self._async_add_entities(new_entities)
 
@@ -97,10 +89,9 @@ class AlertMarker(GeolocationEvent):
     _attr_unit_of_measurement = UnitOfLength.KILOMETERS
     _attr_icon = "mdi:alert"
     # A county-union polygon runs to tens of kilobytes, well past the
-    # recorder's 16 KB attribute cap — which makes it drop *every* attribute
-    # on the entity and log about it on each write. Keeping geometry out of
-    # the recorder leaves it live in the state machine for cards and
-    # templates, which is the only place it was ever useful.
+    # recorder's 16 KB attribute cap, which makes it drop every attribute on
+    # the entity. Keeping geometry out of the recorder leaves it live in the
+    # state machine for cards and templates.
     _unrecorded_attributes = frozenset({"geometry"})
 
     def __init__(
@@ -135,15 +126,17 @@ class AlertMarker(GeolocationEvent):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                f"{SIGNAL_ALERTS_UPDATED}_{self._coordinator.entry.entry_id}_{self._same}",
+                f"{SIGNAL_ALERTS_UPDATED}_{self._coordinator.entry.entry_id}",
                 self._handle_update,
             )
         )
 
     @callback
-    def _handle_update(self, *_args: Any) -> None:
+    def _handle_update(self, same: str) -> None:
+        if same != self._same:
+            return
         if self._current_alert() is None:
-            # Hazard tombstoned — take the marker off the map.
+            # Hazard tombstoned: take the marker off the map.
             self.hass.async_create_task(self.async_remove(force_remove=True))
             return
         self._refresh_from_alert()
@@ -164,6 +157,9 @@ class AlertMarker(GeolocationEvent):
         alert = self._current_alert() or {}
         return {
             "same": self._same,
+            "places": [
+                place.name for place in self._coordinator.places_for_same(self._same)
+            ],
             "event_type": event_key_for(alert) if alert else None,
             "vtec": alert.get("vtec"),
             "severity": alert.get("severity"),

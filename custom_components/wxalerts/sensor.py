@@ -1,10 +1,8 @@
-"""Sensors: highest live severity and active-alert count per county, and the
-lightning proximity set per target.
+"""Sensors per place: highest live severity, active-alert count, top alert,
+storm cell ETA and storm cell threat. One account-wide sensor for feed age.
 
-The alert count sensor carries the full alert list in attributes — that is what
-a Markdown card renders. The lightning sensors answer the only question worth
-asking of a lightning feed: how close, how many, how fast, and which way is it
-moving.
+The alert count sensor carries the full alert list in attributes; that is what
+a Markdown card renders.
 """
 
 from __future__ import annotations
@@ -16,108 +14,76 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfLength, UnitOfTime
+from homeassistant.const import EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import WxAlertsConfigEntry
 from .const import (
-    LOC_COUNTY,
-    LOC_NAME,
-    LOC_SAME,
     SEVERITY_NONE,
     SEVERITY_ORDER,
-    TREND_OPTIONS,
+    STORM_ID,
+    STORM_RUNG,
+    STORM_RUNG_LABEL,
+    THREAT_NONE,
+    THREAT_OPTIONS,
 )
-from .coordinator import WxAlertsCoordinator
-from .entity import WxAlertsLocationEntity, WxAlertsTargetEntity
+from .coordinator import Place, WxAlertsCoordinator, threat_for_rung
+from .entity import WxAlertsAlertEntity, WxAlertsServiceEntity, WxAlertsStormEntity
 from .events import event_key_for, event_name_for
-from .lightning import Target
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: WxAlertsConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
-    entities: list[SensorEntity] = []
 
-    if coordinator.enable_alerts:
-        seen_same: set[str] = set()
-        for location in coordinator.locations:
-            same = location.get(LOC_SAME)
-            if not same or same in seen_same:
-                continue
-            seen_same.add(same)
-            entities.append(HighestSeveritySensor(coordinator, location))
-            entities.append(AlertCountSensor(coordinator, location))
-            entities.append(TopAlertSensor(coordinator, location))
+    def _for_places(places: list[Place]) -> list[SensorEntity]:
+        entities: list[SensorEntity] = []
+        for place in places:
+            entities.append(HighestSeveritySensor(coordinator, place))
+            entities.append(AlertCountSensor(coordinator, place))
+            entities.append(TopAlertSensor(coordinator, place))
+            entities.append(StormEtaSensor(coordinator, place))
+            entities.append(StormThreatSensor(coordinator, place))
+        return entities
 
-    if coordinator.enable_glm:
-        # One set per target — a configured zone, or a tracked person. Identity
-        # is the zone or person entity id, which does not move when a setting
-        # changes; keying on the geohash box (as an earlier release did) renamed
-        # every entity whenever the box size was edited.
-        entities.extend(_lightning_sensors(coordinator, coordinator.targets))
+    @callback
+    def _places_added(places: list[Place]) -> None:
+        async_add_entities(_for_places(places))
 
-        @callback
-        def _targets_added(targets: list[Target]) -> None:
-            # A person who gains a GPS fix after setup is a new target; without
-            # this they would get no entities until the next restart.
-            async_add_entities(_lightning_sensors(coordinator, targets))
-
-        entry.async_on_unload(coordinator.add_target_listener(_targets_added))
-
-    async_add_entities(entities)
+    entry.async_on_unload(coordinator.add_place_listener(_places_added))
+    async_add_entities(
+        [FeedAgeSensor(coordinator), *_for_places(list(coordinator.places.values()))]
+    )
 
 
-def _lightning_sensors(
-    coordinator: WxAlertsCoordinator, targets: list[Target]
-) -> list[SensorEntity]:
-    entities: list[SensorEntity] = []
-    for target in targets:
-        entities.append(NearestStrikeSensor(coordinator, target))
-        entities.append(StrikeRateSensor(coordinator, target))
-        entities.append(SinceLastStrikeSensor(coordinator, target))
-        entities.append(LightningTrendSensor(coordinator, target))
-        entities.extend(
-            RingCountSensor(coordinator, target, ring)
-            for ring in coordinator.glm_rings
-        )
-    return entities
-
-
-class HighestSeveritySensor(WxAlertsLocationEntity, SensorEntity):
-    """Extreme / Severe / Moderate / Minor / None — dashboard colour fuel."""
+class HighestSeveritySensor(WxAlertsAlertEntity, SensorEntity):
+    """Extreme / Severe / Moderate / Minor / None: dashboard colour fuel."""
 
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = [*SEVERITY_ORDER, SEVERITY_NONE]
     _attr_translation_key = "highest_severity"
 
-    def __init__(
-        self, coordinator: WxAlertsCoordinator, location: dict[str, Any]
-    ) -> None:
-        super().__init__(coordinator, location)
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_{self.same}_severity"
+    def __init__(self, coordinator: WxAlertsCoordinator, place: Place) -> None:
+        super().__init__(coordinator, place, "severity")
 
     @property
     def native_value(self) -> str:
         return self.coordinator.highest_severity(self.same)
 
 
-class AlertCountSensor(WxAlertsLocationEntity, SensorEntity):
+class AlertCountSensor(WxAlertsAlertEntity, SensorEntity):
     """Number of live hazards; the full list rides in attributes."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_translation_key = "alert_count"
     _attr_native_unit_of_measurement = "alerts"
 
-    def __init__(
-        self, coordinator: WxAlertsCoordinator, location: dict[str, Any]
-    ) -> None:
-        super().__init__(coordinator, location)
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_{self.same}_count"
+    def __init__(self, coordinator: WxAlertsCoordinator, place: Place) -> None:
+        super().__init__(coordinator, place, "count")
 
     @property
     def native_value(self) -> int:
@@ -132,8 +98,7 @@ class AlertCountSensor(WxAlertsLocationEntity, SensorEntity):
                 "vtec": alert.get("vtec"),
                 # The canonical name and the key an automation selects on. The
                 # raw field is kept beside them because the two feed paths word
-                # the same hazard differently and a bug report needs to say
-                # which one arrived.
+                # the same hazard differently.
                 "event": event_name_for(alert),
                 "event_type": event_key_for(alert),
                 "event_raw": alert.get("event"),
@@ -151,52 +116,44 @@ class AlertCountSensor(WxAlertsLocationEntity, SensorEntity):
             }
             for alert in live
         ]
+        place = self.place
         return {
+            "place_id": self.place_id,
+            "place_name": place.name if place else None,
             "same": self.same,
-            "county_ugc": self.location.get(LOC_COUNTY),
-            "location": self.location.get(LOC_NAME),
-            # Two flat lists beside the full records, because a Markdown card
-            # and a template condition both want the names without walking a
-            # list of dicts to get them.
             "events": [alert["event"] for alert in alerts],
             "event_types": [alert["event_type"] for alert in alerts],
             "alerts": alerts,
         }
 
 
-class TopAlertSensor(WxAlertsLocationEntity, SensorEntity):
+class TopAlertSensor(WxAlertsAlertEntity, SensorEntity):
     """The most urgent hazard in effect, by name.
 
-    The count sensor answers "how many"; this answers "what", which is what a
-    notification body and a dashboard header actually want. Ordering is the
-    coordinator's: severity first, then significance, so a Tornado Warning
-    outranks a Tornado Watch that shares its severity.
+    Not an ENUM device class: the catalogue is a superset of what NWS publishes
+    today and an uncatalogued product still has to be reportable.
     """
 
     _attr_translation_key = "top_alert"
     _attr_icon = "mdi:weather-lightning-rainy"
 
-    def __init__(
-        self, coordinator: WxAlertsCoordinator, location: dict[str, Any]
-    ) -> None:
-        super().__init__(coordinator, location)
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_{self.same}_top"
+    def __init__(self, coordinator: WxAlertsCoordinator, place: Place) -> None:
+        super().__init__(coordinator, place, "top")
 
     @property
     def native_value(self) -> str:
         alerts = self.coordinator.alerts_for(self.same)
-        # Not an ENUM device class: the catalogue is a superset of what NWS
-        # publishes today and an uncatalogued product still has to be
-        # reportable. An ENUM would log it as an invalid state instead.
         return event_name_for(alerts[0]) if alerts else SEVERITY_NONE
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         alerts = self.coordinator.alerts_for(self.same)
         top = alerts[0] if alerts else None
+        place = self.place
         return {
+            "place_id": self.place_id,
+            "place_name": place.name if place else None,
             "same": self.same,
-            "location": self.location.get(LOC_NAME),
             "event_type": event_key_for(top) if top else None,
             "severity": top.get("severity") if top else SEVERITY_NONE,
             "headline": top.get("headline") if top else None,
@@ -207,141 +164,78 @@ class TopAlertSensor(WxAlertsLocationEntity, SensorEntity):
         }
 
 
-class _LightningSensor(WxAlertsTargetEntity, SensorEntity):
-    """Common attributes for every proximity sensor."""
+class StormEtaSensor(WxAlertsStormEntity, SensorEntity):
+    """Minutes until the most threatening storm cell arrives.
 
-    _attr_icon = "mdi:flash"
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        target = self.target
-        return {
-            "target": self._target_name,
-            "target_kind": target.kind if target else None,
-            "window_minutes": self.coordinator.glm_window_minutes,
-            "radius_mi": self.coordinator.glm_radius_mi,
-        }
-
-
-class NearestStrikeSensor(_LightningSensor):
-    """Distance to the closest flash in the window.
-
-    Unknown rather than the radius when nothing has been seen: "no lightning
-    within 30 miles" and "lightning exactly 30 miles away" are different
-    answers, and a number cannot carry both.
-    """
-
-    _attr_device_class = SensorDeviceClass.DISTANCE
-    _attr_native_unit_of_measurement = UnitOfLength.MILES
-    _attr_translation_key = "nearest_strike"
-    _attr_suggested_display_precision = 1
-
-    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
-        super().__init__(coordinator, target)
-        self._attr_unique_id = (
-            f"{coordinator.entry.entry_id}_glm_{target.key}_nearest"
-        )
-
-    @property
-    def native_value(self) -> float | None:
-        return self.metrics.nearest_mi
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            **super().extra_state_attributes,
-            "closest_flashes": self.coordinator.recent_flashes(self.target_key, 10),
-        }
-
-
-class RingCountSensor(_LightningSensor):
-    """Flashes inside one ring over the window."""
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = "flashes"
-
-    def __init__(
-        self, coordinator: WxAlertsCoordinator, target: Target, ring: int
-    ) -> None:
-        super().__init__(coordinator, target)
-        self._ring = ring
-        self._attr_name = f"Strikes {ring}mi"
-        self._attr_unique_id = (
-            f"{coordinator.entry.entry_id}_glm_{target.key}_ring{ring}"
-        )
-
-    @property
-    def native_value(self) -> int:
-        return self.metrics.rings.get(self._ring, 0)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return {**super().extra_state_attributes, "ring_mi": self._ring}
-
-
-class StrikeRateSensor(_LightningSensor):
-    """Flashes per minute inside the outer radius.
-
-    Rate is the severe-weather signal, not energy: GLM cannot tell
-    cloud-to-ground from intra-cloud, so a big energy number says nothing about
-    danger, while a sharp rise in rate is the documented precursor.
-    """
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = "flashes/min"
-    _attr_translation_key = "strike_rate"
-    _attr_suggested_display_precision = 2
-
-    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
-        super().__init__(coordinator, target)
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_glm_{target.key}_rate"
-
-    @property
-    def native_value(self) -> float:
-        return self.metrics.rate_per_min
-
-
-class SinceLastStrikeSensor(_LightningSensor):
-    """Minutes since the most recent flash inside the radius.
-
-    This is what a 30-30 style all-clear is built on, so it stays a number in
-    minutes rather than a timestamp an automation would have to subtract.
+    Counts down between messages, and is unknown with no storm: "no storm"
+    and "a storm zero minutes away" are different answers.
     """
 
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_native_unit_of_measurement = UnitOfTime.MINUTES
-    _attr_translation_key = "since_last_strike"
-    _attr_suggested_display_precision = 1
+    _attr_suggested_display_precision = 0
+    _attr_translation_key = "storm_cell_eta"
 
-    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
-        super().__init__(coordinator, target)
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_glm_{target.key}_last"
+    def __init__(self, coordinator: WxAlertsCoordinator, place: Place) -> None:
+        super().__init__(coordinator, place, "storm_eta")
 
     @property
     def native_value(self) -> float | None:
-        return self.metrics.last_strike_min
+        return self.coordinator.storm_eta(self.storm)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        last = self.metrics.last_flash_at
-        return {
-            **super().extra_state_attributes,
-            "last_flash": last.isoformat() if last else None,
-        }
+        storm = self.storm or {}
+        return {"place_id": self.place_id, "storm_id": storm.get(STORM_ID)}
 
 
-class LightningTrendSensor(_LightningSensor):
-    """Approaching / Receding / Steady / Unknown."""
+class StormThreatSensor(WxAlertsStormEntity, SensorEntity):
+    """The rung of the most threatening storm cell, as an enum."""
 
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = TREND_OPTIONS
-    _attr_translation_key = "lightning_trend"
-    _attr_icon = "mdi:trending-up"
+    _attr_options = THREAT_OPTIONS
+    _attr_translation_key = "storm_cell_threat"
 
-    def __init__(self, coordinator: WxAlertsCoordinator, target: Target) -> None:
-        super().__init__(coordinator, target)
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_glm_{target.key}_trend"
+    def __init__(self, coordinator: WxAlertsCoordinator, place: Place) -> None:
+        super().__init__(coordinator, place, "storm_threat")
 
     @property
     def native_value(self) -> str:
-        return self.metrics.trend
+        storm = self.storm
+        return threat_for_rung(storm.get(STORM_RUNG)) if storm else THREAT_NONE
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        storm = self.storm or {}
+        return {
+            "place_id": self.place_id,
+            "storm_id": storm.get(STORM_ID),
+            "rung": storm.get(STORM_RUNG),
+            "rung_label": storm.get(STORM_RUNG_LABEL),
+        }
+
+
+class FeedAgeSensor(WxAlertsServiceEntity, SensorEntity):
+    """Seconds since the server's status heartbeat was written.
+
+    Keeps rising on its own when nothing arrives, which is the point: a feed
+    that stopped has to look different from a quiet day.
+    """
+
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_suggested_display_precision = 0
+    _attr_translation_key = "feed_age"
+
+    def __init__(self, coordinator: WxAlertsCoordinator) -> None:
+        super().__init__(coordinator, "feed_age")
+
+    @property
+    def native_value(self) -> int | None:
+        age = self.coordinator.feed_age
+        return None if age is None else round(age)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"online": self.coordinator.feed_online}
