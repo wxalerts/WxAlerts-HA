@@ -36,6 +36,13 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.ssl import get_default_context
 
 from .const import (
+    FC_DAILY,
+    FC_HOURLY,
+    FC_ISSUED_AT,
+    FC_SOURCE,
+    FORECAST_STALE_SECONDS,
+    SIGNAL_FORECAST_UPDATED,
+    TOPIC_FORECAST_PLACE,
     COND_OBSERVED_AT,
     COND_STATION_ID,
     CONDITIONS_STALE_SECONDS,
@@ -494,8 +501,9 @@ class WxAlertsCoordinator:
         # begins" trigger means.
         self._active_events: dict[str, set[str]] = {}
 
-        # Latest observation per place id.
+        # Latest observation and forecast per place id.
         self._conditions: dict[str, dict[str, Any]] = {}
+        self._forecasts: dict[str, dict[str, Any]] = {}
         # Storm cells, keyed place id -> storm id -> payload.
         self._storms: dict[str, dict[str, dict[str, Any]]] = {}
         # When each storm was last heard from, for expiry when updated_at is
@@ -805,6 +813,10 @@ class WxAlertsCoordinator:
             self._handle_places(payload)
         elif rest == TOPIC_STATUS:
             self._handle_status(payload)
+        elif rest.startswith(TOPIC_FORECAST_PLACE + "/"):
+            place_id = rest[len(TOPIC_FORECAST_PLACE) + 1:]
+            if place_id and "/" not in place_id:
+                self._handle_forecast(place_id, payload)
         elif rest.startswith(TOPIC_CONDITIONS_PLACE + "/"):
             place_id = rest[len(TOPIC_CONDITIONS_PLACE) + 1:]
             if place_id and "/" not in place_id:
@@ -875,6 +887,7 @@ class WxAlertsCoordinator:
         for place_id in removed:
             self._forget_place_storms(place_id)
             self._conditions.pop(place_id, None)
+            self._forecasts.pop(place_id, None)
         if new:
             self._remove_stale_place_devices(set(new))
         for place in changed:
@@ -1064,6 +1077,32 @@ class WxAlertsCoordinator:
         async_dispatcher_send(
             self.hass, f"{SIGNAL_CONDITIONS_UPDATED}_{self.entry.entry_id}_{place_id}"
         )
+
+    def _handle_forecast(self, place_id: str, payload: bytes) -> None:
+        if not payload:
+            self._forecasts.pop(place_id, None)
+        else:
+            try:
+                forecast = json.loads(payload)
+            except ValueError:
+                _LOGGER.warning("Undecodable forecast payload for place %s", place_id)
+                return
+            if not isinstance(forecast, dict):
+                return
+            self._forecasts[place_id] = forecast
+        async_dispatcher_send(
+            self.hass, f"{SIGNAL_FORECAST_UPDATED}_{self.entry.entry_id}_{place_id}"
+        )
+
+    def forecast_for(self, place_id: str) -> dict[str, Any] | None:
+        """The place's forecast, or None if missing or issued too long ago."""
+        forecast = self._forecasts.get(place_id)
+        if not forecast:
+            return None
+        issued = _parse_time(forecast.get(FC_ISSUED_AT))
+        if issued is not None and time.time() - issued > FORECAST_STALE_SECONDS:
+            return None
+        return forecast
 
     def conditions_for(self, place_id: str) -> dict[str, Any] | None:
         """The place's latest observation, or None if missing or stale.
@@ -1404,6 +1443,16 @@ class WxAlertsCoordinator:
                     "fresh": self.conditions_for(place_id) is not None,
                 }
                 for place_id, obs in self._conditions.items()
+            },
+            "forecast_per_place": {
+                place_id: {
+                    "issued_at": fc.get(FC_ISSUED_AT),
+                    "source": fc.get(FC_SOURCE),
+                    "days": len(fc.get(FC_DAILY) or []),
+                    "hours": len(fc.get(FC_HOURLY) or []),
+                    "fresh": self.forecast_for(place_id) is not None,
+                }
+                for place_id, fc in self._forecasts.items()
             },
             "feed_online": self._status_online,
             "feed_age_seconds": None

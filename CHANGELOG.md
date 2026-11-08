@@ -54,6 +54,12 @@ sign in to wxalerts.org. See *Upgrading from 0.x* in the README.
   visibility, precipitation in the last hour and the condition text. Metric
   native units, converted by Home Assistant. Unavailable when the observation
   is over two hours old or missing.
+- **Daily and hourly forecast per place** on the weather entity, from the
+  retained `wxalerts/u/<username>/forecast/place/<place_id>` topic: 7 days
+  and 48 hours, pushed to the weather card as soon as a new forecast arrives,
+  with finished hours and past days dropped as the clock moves. Clear reads
+  sunny or clear-night by each hour's `is_daytime`. The forecast and current
+  conditions work independently.
 - **Feed age.** An account-wide *Feed age* sensor from the server's status
   heartbeat, and a *Connected* sensor. Storm cell entities go unavailable when
   the heartbeat is 15 minutes old or reports offline. A 30 second timer keeps

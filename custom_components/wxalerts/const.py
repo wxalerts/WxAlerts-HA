@@ -147,6 +147,34 @@ COND_PRECIP_LAST_HOUR_MM = "precip_last_hour_mm"
 # An observation older than this makes the conditions entities unavailable.
 CONDITIONS_STALE_SECONDS = 7200
 
+# forecast/place/<place_id>: retained forecast for the place; nulls explicit,
+# empty message clears it. Same condition_code set as conditions.
+TOPIC_FORECAST_PLACE = "forecast/place"
+FC_ISSUED_AT = "issued_at"
+FC_SOURCE = "source"
+FC_DAILY = "daily"
+FC_HOURLY = "hourly"
+FC_DATE = "date"
+FC_DATETIME = "datetime"
+FC_CONDITION_CODE = "condition_code"
+FC_TEMP_HIGH_C = "temp_high_c"
+FC_TEMP_LOW_C = "temp_low_c"
+FC_TEMPERATURE_C = "temperature_c"
+FC_APPARENT_TEMPERATURE_C = "apparent_temperature_c"
+FC_DEWPOINT_C = "dewpoint_c"
+FC_HUMIDITY = "humidity"
+FC_PRECIP_PROBABILITY = "precip_probability"
+FC_PRECIP_MM = "precip_mm"
+FC_WIND_SPEED_KMH = "wind_speed_kmh"
+FC_WIND_GUST_KMH = "wind_gust_kmh"
+FC_WIND_DIRECTION_DEG = "wind_direction_deg"
+FC_UV_INDEX = "uv_index"
+FC_SUMMARY = "summary"
+FC_CLOUD_COVER = "cloud_cover"
+FC_IS_DAYTIME = "is_daytime"
+# A forecast issued longer ago than this is not offered.
+FORECAST_STALE_SECONDS = 24 * 3600
+
 EPISODE_OPEN = "open"
 EPISODE_ESCALATE = "escalate"
 EPISODE_UPDATE = "update"
@@ -223,6 +251,7 @@ EVENT_STORM_CELL = "wxalerts_storm_cell"
 SIGNAL_ALERTS_UPDATED = f"{DOMAIN}_alerts_updated"  # + _{entry_id}_{same}
 SIGNAL_STORMS_UPDATED = f"{DOMAIN}_storms_updated"  # + _{entry_id}_{place_id}
 SIGNAL_CONDITIONS_UPDATED = f"{DOMAIN}_conditions_updated"  # + _{entry_id}_{place_id}
+SIGNAL_FORECAST_UPDATED = f"{DOMAIN}_forecast_updated"  # + _{entry_id}_{place_id}
 SIGNAL_PLACE_UPDATED = f"{DOMAIN}_place_updated"  # + _{entry_id}_{place_id}
 SIGNAL_CONNECTION = f"{DOMAIN}_connection"  # + _{entry_id}
 SIGNAL_TICK = f"{DOMAIN}_tick"  # + _{entry_id}

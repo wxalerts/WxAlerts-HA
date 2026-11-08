@@ -1,6 +1,8 @@
-"""A weather entity per place: the latest observation near it.
+"""A weather entity per place: the latest observation near it, plus the
+place's daily and hourly forecast.
 
-Current conditions only. The feed carries no forecast, so none is offered.
+Current conditions and the forecast are independent: either one missing or
+stale leaves the other working.
 """
 
 from __future__ import annotations
@@ -23,7 +25,9 @@ from homeassistant.components.weather import (
     ATTR_CONDITION_SUNNY,
     ATTR_CONDITION_WINDY,
     ATTR_CONDITION_WINDY_VARIANT,
+    Forecast,
     WeatherEntity,
+    WeatherEntityFeature,
 )
 from homeassistant.const import (
     UnitOfLength,
@@ -34,10 +38,33 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.sun import is_up
+from homeassistant.util import dt as dt_util
 
 from . import WxAlertsConfigEntry
 from .const import (
+    FC_APPARENT_TEMPERATURE_C,
+    FC_CLOUD_COVER,
+    FC_CONDITION_CODE,
+    FC_DAILY,
+    FC_DATE,
+    FC_DATETIME,
+    FC_DEWPOINT_C,
+    FC_HOURLY,
+    FC_HUMIDITY,
+    FC_IS_DAYTIME,
+    FC_PRECIP_MM,
+    FC_PRECIP_PROBABILITY,
+    FC_TEMP_HIGH_C,
+    FC_TEMP_LOW_C,
+    FC_TEMPERATURE_C,
+    FC_UV_INDEX,
+    FC_WIND_DIRECTION_DEG,
+    FC_WIND_GUST_KMH,
+    FC_WIND_SPEED_KMH,
+    SIGNAL_FORECAST_UPDATED,
+    SIGNAL_TICK,
     COND_CONDITION_CODE,
     COND_DEWPOINT_C,
     COND_FEELS_LIKE_C,
@@ -50,7 +77,7 @@ from .const import (
     COND_WIND_SPEED_KMH,
 )
 from .coordinator import Place, WxAlertsCoordinator
-from .entity import WxAlertsConditionsEntity
+from .entity import WxAlertsConditionsEntity, WxAlertsPlaceEntity
 
 # A clear sky reads "sunny" by day and "clear-night" by night; every other
 # condition is the same either way.
@@ -181,6 +208,95 @@ def _number(observation: dict[str, Any], field: str) -> float | None:
         return None
 
 
+def _int(entry: dict[str, Any], field: str) -> int | None:
+    value = _number(entry, field)
+    return None if value is None else round(value)
+
+
+def _when(entry: dict[str, Any]) -> Any:
+    raw = entry.get(FC_DATETIME)
+    return dt_util.parse_datetime(raw) if isinstance(raw, str) else None
+
+
+def daily_forecast(forecast: dict[str, Any] | None) -> list[Forecast] | None:
+    """Home Assistant daily Forecast dicts, from today on, native metric."""
+    if not forecast or not isinstance(forecast.get(FC_DAILY), list):
+        return None
+    today = dt_util.now().date()
+    days: list[Forecast] = []
+    for entry in forecast[FC_DAILY]:
+        if not isinstance(entry, dict):
+            continue
+        when = _when(entry)
+        date_text = entry.get(FC_DATE)
+        day = dt_util.parse_date(date_text) if isinstance(date_text, str) else None
+        if day is None and when is not None:
+            day = dt_util.as_local(when).date()
+        if when is None and day is None:
+            continue
+        if day is not None and day < today:
+            continue
+        days.append(
+            Forecast(
+                datetime=(when.isoformat() if when else f"{day.isoformat()}T00:00:00+00:00"),
+                condition=map_condition(entry.get(FC_CONDITION_CODE), True),
+                native_temperature=_number(entry, FC_TEMP_HIGH_C),
+                native_templow=_number(entry, FC_TEMP_LOW_C),
+                precipitation_probability=_int(entry, FC_PRECIP_PROBABILITY),
+                native_precipitation=_number(entry, FC_PRECIP_MM),
+                native_wind_speed=_number(entry, FC_WIND_SPEED_KMH),
+                native_wind_gust_speed=_number(entry, FC_WIND_GUST_KMH),
+                wind_bearing=_number(entry, FC_WIND_DIRECTION_DEG),
+                humidity=_number(entry, FC_HUMIDITY),
+                uv_index=_number(entry, FC_UV_INDEX),
+            )
+        )
+    return days
+
+
+def hourly_forecast(forecast: dict[str, Any] | None) -> list[Forecast] | None:
+    """Home Assistant hourly Forecast dicts from the current hour on.
+
+    An hour is dropped once it is over; the one in progress stays. Clear
+    reads sunny or clear-night by the entry's own is_daytime.
+    """
+    if not forecast or not isinstance(forecast.get(FC_HOURLY), list):
+        return None
+    now = dt_util.utcnow()
+    hours: list[Forecast] = []
+    for entry in forecast[FC_HOURLY]:
+        if not isinstance(entry, dict):
+            continue
+        when = _when(entry)
+        if when is None:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=dt_util.UTC)
+        if (now - when).total_seconds() >= 3600:
+            continue
+        daytime = entry.get(FC_IS_DAYTIME)
+        hours.append(
+            Forecast(
+                datetime=when.isoformat(),
+                condition=map_condition(
+                    entry.get(FC_CONDITION_CODE), daytime is not False
+                ),
+                native_temperature=_number(entry, FC_TEMPERATURE_C),
+                native_apparent_temperature=_number(entry, FC_APPARENT_TEMPERATURE_C),
+                native_dew_point=_number(entry, FC_DEWPOINT_C),
+                humidity=_number(entry, FC_HUMIDITY),
+                precipitation_probability=_int(entry, FC_PRECIP_PROBABILITY),
+                native_precipitation=_number(entry, FC_PRECIP_MM),
+                native_wind_speed=_number(entry, FC_WIND_SPEED_KMH),
+                native_wind_gust_speed=_number(entry, FC_WIND_GUST_KMH),
+                wind_bearing=_number(entry, FC_WIND_DIRECTION_DEG),
+                cloud_coverage=_int(entry, FC_CLOUD_COVER),
+                is_daytime=daytime if isinstance(daytime, bool) else None,
+            )
+        )
+    return hours
+
+
 class PlaceWeather(WxAlertsConditionsEntity, WeatherEntity):
     """Current conditions at the nearest station to the place."""
 
@@ -191,9 +307,69 @@ class PlaceWeather(WxAlertsConditionsEntity, WeatherEntity):
     _attr_native_wind_speed_unit = UnitOfSpeed.KILOMETERS_PER_HOUR
     _attr_native_visibility_unit = UnitOfLength.KILOMETERS
     _attr_native_precipitation_unit = UnitOfPrecipitationDepth.MILLIMETERS
+    _attr_supported_features = (
+        WeatherEntityFeature.FORECAST_DAILY | WeatherEntityFeature.FORECAST_HOURLY
+    )
 
     def __init__(self, coordinator: WxAlertsCoordinator, place: Place) -> None:
         super().__init__(coordinator, place, "weather")
+        # What the forecast cards were last sent, so the clock only pushes an
+        # update when an hour or a day has actually rolled off.
+        self._forecast_shape: tuple[int, int] | None = None
+
+    @property
+    def available(self) -> bool:
+        # Either half is worth showing on its own: a station that stopped
+        # reporting must not hide the forecast, nor the reverse.
+        return WxAlertsPlaceEntity.available.fget(self) and (
+            self.observation is not None or self._forecast is not None
+        )
+
+    @property
+    def _forecast(self) -> dict[str, Any] | None:
+        return self.coordinator.forecast_for(self.place_id)
+
+    async def async_forecast_daily(self) -> list[Forecast] | None:
+        return daily_forecast(self._forecast)
+
+    async def async_forecast_hourly(self) -> list[Forecast] | None:
+        return hourly_forecast(self._forecast)
+
+    def _shape(self) -> tuple[int, int]:
+        forecast = self._forecast
+        return (
+            len(daily_forecast(forecast) or []),
+            len(hourly_forecast(forecast) or []),
+        )
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        entry_id = self.coordinator.entry.entry_id
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{SIGNAL_FORECAST_UPDATED}_{entry_id}_{self.place_id}",
+                self._handle_forecast,
+            )
+        )
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, f"{SIGNAL_TICK}_{entry_id}", self._handle_forecast_tick
+            )
+        )
+
+    @callback
+    def _handle_forecast(self, *_args: Any) -> None:
+        self._forecast_shape = self._shape()
+        self.async_write_ha_state()
+        self.hass.async_create_task(self.async_update_listeners(None))
+
+    @callback
+    def _handle_forecast_tick(self, *_args: Any) -> None:
+        shape = self._shape()
+        if shape != self._forecast_shape:
+            self._forecast_shape = shape
+            self.hass.async_create_task(self.async_update_listeners(None))
 
     @property
     def _obs(self) -> dict[str, Any]:

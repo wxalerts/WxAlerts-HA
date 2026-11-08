@@ -31,9 +31,10 @@ Each place gets:
 - **Storm cell alerts**: when a storm cell's forecast path threatens the
   place, a safety sensor turns on with the cell's arrival time, threat rung,
   probabilities, speed, bearing and distance.
-- **Current conditions** from the nearest observing station: temperature,
-  dew point, feels like, humidity, wind, pressure, visibility, rain in the
-  last hour, and a `weather` entity.
+- **Weather**: current conditions from the nearest observing station
+  (temperature, dew point, feels like, humidity, wind, pressure, visibility,
+  rain in the last hour) and a `weather` entity with daily and hourly
+  forecasts.
 - **Device triggers** for every NWS alert type and for storm cell episodes,
   ready in the automation editor with nothing to configure.
 
@@ -113,8 +114,13 @@ Entity ids below are for a place named Home.
 
 Current conditions, from the observing station nearest the place:
 
-- `weather.wxalerts_home`: current conditions (no forecast), with
-  `station`, `station_id`, `distance_km` and `observed_at` attributes.
+- `weather.wxalerts_home`: current conditions plus a 7 day **daily** and 48
+  hour **hourly** forecast, so the weather card shows both tabs. Attributes
+  `station`, `station_id`, `distance_km` and `observed_at`. Hours that have
+  finished and days that have passed drop off on their own; use the
+  `weather.get_forecasts` action in automations. Current conditions and the
+  forecast are independent: either one missing leaves the other working, and
+  a forecast issued more than 24 hours ago is withdrawn.
 - `sensor.wxalerts_home_temperature`, `_dew_point`, `_feels_like`,
   `_humidity`, `_wind_speed`, `_wind_gust`, `_wind_bearing`, `_pressure`,
   `_visibility` and `_precipitation_last_hour`: proper device classes, so
@@ -342,7 +348,7 @@ a revoke or a plan change reaches Home Assistant.
 The feed is one MQTT v5 connection over websockets to
 `wss://mqtt.wxalerts.org/mqtt` (port 443), using that login. It subscribes to your
 account's topics (`wxalerts/u/<username>/#`: places, storm cells, current
-conditions and the feed status) and to the public alert tree of each county your places are in.
+conditions, forecasts and the feed status) and to the public alert tree of each county your places are in.
 Everything is retained, so every entity is correct the moment Home Assistant
 starts, with no polling.
 

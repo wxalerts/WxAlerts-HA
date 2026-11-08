@@ -259,3 +259,70 @@ def conditions(age_seconds: float = 300.0, **overrides) -> dict:
         "precip_last_hour_mm": 1.3,
         **overrides,
     }
+
+
+def forecast_topic(place_id) -> str:
+    return f"{PREFIX}forecast/place/{place_id}"
+
+
+def _iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def forecast(issued_age_seconds: float = 600.0, days: int = 7, hours: int = 48) -> dict:
+    """A forecast message in the contract's shape, starting yesterday (daily)
+    and two hours ago (hourly), so the trimming has something to drop."""
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    top_of_hour = now.replace(minute=0, second=0, microsecond=0)
+    from homeassistant.util import dt as dt_util
+
+    # Home Assistant's time zone, which is what "today" is measured in.
+    local_midnight = dt_util.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    daily = []
+    for n in range(-1, days - 1):
+        day = local_midnight + timedelta(days=n)
+        daily.append(
+            {
+                "date": day.date().isoformat(),
+                "datetime": _iso(day.astimezone(timezone.utc)),
+                "condition_code": "tsra" if n == 0 else "partly_cloudy",
+                "temp_high_c": 31.0 + n,
+                "temp_low_c": 22.0,
+                "precip_probability": 60,
+                "precip_mm": 8.4,
+                "wind_speed_kmh": 14.0,
+                "wind_gust_kmh": 40.0,
+                "wind_direction_deg": 180,
+                "humidity": 78,
+                "uv_index": 9 if n == 0 else None,
+                "summary": "Storms likely" if n == 0 else None,
+            }
+        )
+    hourly = []
+    for n in range(-2, hours - 2):
+        when = top_of_hour + timedelta(hours=n)
+        hourly.append(
+            {
+                "datetime": _iso(when),
+                "condition_code": "clear",
+                "temperature_c": 25.0 + n / 10,
+                "apparent_temperature_c": 27.0,
+                "dewpoint_c": 21.0,
+                "humidity": 80,
+                "precip_probability": 10,
+                "precip_mm": 0.0,
+                "wind_speed_kmh": 9.0,
+                "wind_gust_kmh": None,
+                "wind_direction_deg": 150,
+                "cloud_cover": 5,
+                "is_daytime": n % 2 == 0,
+            }
+        )
+    return {
+        "issued_at": _iso(now - timedelta(seconds=issued_age_seconds)),
+        "source": "nws",
+        "daily": daily,
+        "hourly": hourly,
+    }
