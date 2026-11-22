@@ -34,6 +34,8 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_PLACES,
+    CONF_TOPICS_VERSION,
+    TOPICS_V2,
     DOMAIN,
     EPISODE_ESCALATE,
     EPISODE_OPEN,
@@ -95,17 +97,31 @@ def _place_for_device(hass: HomeAssistant, device_id: str) -> Place | None:
     return None
 
 
+def _on_v2(hass: HomeAssistant, device_id: str) -> bool:
+    """Whether the device's entry reads the V2 topics, where every place has an
+    alert feed behind it, with or without a county."""
+    device = dr.async_get(hass).async_get(device_id)
+    if device is None:
+        return False
+    for entry_id in device.config_entries:
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry is not None and entry.domain == DOMAIN:
+            return entry.data.get(CONF_TOPICS_VERSION) == TOPICS_V2
+    return False
+
+
 async def async_get_triggers(
     hass: HomeAssistant, device_id: str
 ) -> list[dict[str, Any]]:
-    """Storm cell triggers on every place; hazard triggers where there is a
-    county feed behind the place, since elsewhere they could never fire."""
+    """Storm cell triggers on every place; hazard triggers where there is an
+    alert feed behind the place (its county on V1, any place on V2), since
+    elsewhere they could never fire."""
     place = _place_for_device(hass, device_id)
     if place is None:
         return []
     base = {CONF_PLATFORM: "device", CONF_DEVICE_ID: device_id, CONF_DOMAIN: DOMAIN}
     types = list(STORM_TRIGGER_TYPES)
-    if place.same:
+    if place.same or _on_v2(hass, device_id):
         types.extend(HAZARD_TRIGGER_TYPES)
     return [{**base, CONF_TYPE: trigger_type} for trigger_type in types]
 

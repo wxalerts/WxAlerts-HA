@@ -25,7 +25,6 @@ from .const import (
     SIGNAL_ALERTS_UPDATED,
     SIGNAL_CONNECTION,
     SIGNAL_PLACE_UPDATED,
-    TOPIC_ALERT_ROOT,
 )
 from .coordinator import Place, WxAlertsCoordinator
 from .entity import place_device_info
@@ -58,7 +57,8 @@ class AlertMarkerManager:
         self._hass = hass
         self._coordinator = coordinator
         self._async_add_entities = async_add_entities
-        self._known: set[tuple[str, str]] = set()
+        # (place id, alert key) -> the scope it was filed under.
+        self._known: dict[tuple[str, str], str] = {}
 
     def start(self) -> list:
         entry_id = self._coordinator.entry.entry_id
@@ -68,27 +68,31 @@ class AlertMarkerManager:
             ),
             self._coordinator.add_place_listener(self._places_added),
         ]
-        for same in self._coordinator.same_codes:
-            self._sync(same)
+        for scope in self._coordinator.alert_scopes:
+            self._sync(scope)
         return unsubs
 
     @callback
     def _places_added(self, places: list[Place]) -> None:
-        for same in {place.same for place in places if place.same}:
-            self._sync(same)
+        scopes = {
+            scope
+            for scope in (self._coordinator.scope_for(place) for place in places)
+            if scope
+        }
+        for scope in scopes:
+            self._sync(scope)
 
     @callback
-    def _sync(self, same: str) -> None:
-        current = self._coordinator.alert_topics_for(same)
-        prefix = f"{TOPIC_ALERT_ROOT}{same}/"
-        places = self._coordinator.places_for_same(same)
+    def _sync(self, scope: str) -> None:
+        current = self._coordinator.alert_topics_for(scope)
+        places = self._coordinator.places_for_scope(scope)
         place_ids = {place.id for place in places}
         # Markers for ended hazards or departed places remove themselves on
         # the same signal; forget them here so a reissue gets a new one.
         self._known = {
-            (place_id, topic)
-            for place_id, topic in self._known
-            if not topic.startswith(prefix)
+            (place_id, topic): known_scope
+            for (place_id, topic), known_scope in self._known.items()
+            if known_scope != scope
             or (topic in current and place_id in place_ids)
         }
         new_entities = []
@@ -99,9 +103,9 @@ class AlertMarkerManager:
                 centroid = geometry_centroid(alert.get("geometry"))
                 if centroid is None:
                     continue
-                self._known.add((place.id, topic))
+                self._known[(place.id, topic)] = scope
                 new_entities.append(
-                    AlertMarker(self._coordinator, place, same, topic, centroid)
+                    AlertMarker(self._coordinator, place, scope, topic, centroid)
                 )
         if new_entities:
             self._async_add_entities(new_entities)
@@ -125,13 +129,13 @@ class AlertMarker(GeolocationEvent):
         self,
         coordinator: WxAlertsCoordinator,
         place: Place,
-        same: str,
+        scope: str,
         topic: str,
         centroid: tuple[float, float],
     ) -> None:
         self._coordinator = coordinator
         self._place_id = place.id
-        self._same = same
+        self._scope = scope
         self._topic = topic
         self._attr_latitude, self._attr_longitude = centroid
         entry_id = coordinator.entry.entry_id
@@ -140,13 +144,13 @@ class AlertMarker(GeolocationEvent):
         self._refresh_from_alert()
 
     def _current_alert(self) -> dict[str, Any] | None:
-        return self._coordinator.alert_topics_for(self._same).get(self._topic)
+        return self._coordinator.alert_topics_for(self._scope).get(self._topic)
 
     def _still_here(self) -> bool:
         place = self._coordinator.place(self._place_id)
         return (
             place is not None
-            and place.same == self._same
+            and self._coordinator.scope_for(place) == self._scope
             and self._current_alert() is not None
         )
 
@@ -181,8 +185,8 @@ class AlertMarker(GeolocationEvent):
             )
 
     @callback
-    def _handle_alerts(self, same: str) -> None:
-        if same == self._same:
+    def _handle_alerts(self, scope: str) -> None:
+        if scope == self._scope:
             self._handle_update()
 
     @callback
@@ -219,7 +223,7 @@ class AlertMarker(GeolocationEvent):
         return {
             "place_id": self._place_id,
             "place_name": place.name if place else None,
-            "same": self._same,
+            "same": place.same if place else None,
             "event_type": event_key_for(alert) if alert else None,
             "vtec": alert.get("vtec"),
             "severity": alert.get("severity"),

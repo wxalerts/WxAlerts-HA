@@ -336,9 +336,9 @@ Automations that pointed at 0.x entities need repointing: the new ids are
   `binary_sensor.wxalerts_connected`. Unavailable means the feed has not
   reported for 15 minutes or Home Assistant is offline, never that the sky
   is clear.
-- **Some counties have no alerts**: the broker allows 20 subscriptions per
-  client, which covers 17 distinct counties. A warning in the log names how
-  many were left out.
+- **Some counties have no alerts**: on the V1 topics the broker allows 20
+  subscriptions per client, which covers 17 distinct counties. A warning in the
+  log names how many were left out. The V2 topics have no such limit.
 - **Diagnostics**: on the integration page, open the menu and choose
   **Download diagnostics**. The sign-in token, broker login, instance id and
   place coordinates are redacted.
@@ -363,6 +363,44 @@ account's topics (`wxalerts/u/<username>/#`: places, storm cells, current
 conditions, forecasts and the feed status) and to the public alert tree of each county your places are in.
 Everything is retained, so every entity is correct the moment Home Assistant
 starts, with no polling.
+
+### The newer topic set (MQTT V2)
+
+When the API advertises it (the registration and every heartbeat carry
+`topics_version: 2`, the account id and this instance's key), the integration
+uses the V2 topics instead and reconnects once to switch. Until then, and
+against an API that has never heard of V2, it keeps using the topics above;
+an instance moves back on its own if the API stops advertising V2.
+
+- **Two subscriptions, however many places you have**: `V2/<account id>/NWS/#`
+  (your alerts, already filtered to your places) and
+  `V2/<account id>/HA/<instance>/#` (places, storm cells, current conditions,
+  forecasts and the feed status, with the same subtopics and payloads as
+  before). The county limit above no longer applies, and a place with no
+  county now gets alerts too.
+- **Alerts belong to places**, not counties. Two places in one county no
+  longer share an alert: a polygon warning shows only on the places inside it.
+  A partial cancellation removes the alert from the places it releases and
+  keeps it on the others.
+- **Alerts are not retained on V2.** On start and after every reconnect the
+  integration reads the alerts in force at each place from the public API
+  (`GET /alerts/at`), silently (no events for what was already in effect), then
+  applies the feed's updates on top. Alerts that ended while the connection
+  was down disappear, and a place you add is loaded straight away. If the API
+  cannot be reached the places keep what they had and it tries again after 30
+  seconds, 2 minutes and 5 minutes.
+- **What a V2 alert message lacks is read from the API.** A V2 alert has a
+  short id, no description or instruction and a simplified shape. For each
+  alert the integration fetches `GET /alerts/page/<short id>` and fills in the
+  numeric `id`, the `instruction` and the description. If that fails the
+  alert still shows, with `id` and `instruction` empty until the next update.
+  Everything else the entities show (event, severity, urgency, certainty,
+  headline, onset, ends, VTEC action, geometry) comes from the message. An
+  alert loaded at start-up has no VTEC `action` until the feed says
+  something about it.
+- **A missed cancel**: nothing is retained, so an alert whose end was never
+  heard is dropped an hour after its end time, and corrected by the next
+  reconnect.
 
 ## Development
 

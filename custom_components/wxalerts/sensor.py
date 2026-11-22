@@ -156,7 +156,7 @@ class HighestSeveritySensor(WxAlertsAlertEntity, SensorEntity):
 
     @property
     def native_value(self) -> str:
-        return self.coordinator.highest_severity(self.same)
+        return self.coordinator.highest_severity(self.alert_scope)
 
 
 class AlertCountSensor(WxAlertsAlertEntity, SensorEntity):
@@ -171,11 +171,11 @@ class AlertCountSensor(WxAlertsAlertEntity, SensorEntity):
 
     @property
     def native_value(self) -> int:
-        return len(self.coordinator.alerts_for(self.same))
+        return len(self.coordinator.alerts_for(self.alert_scope))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        live = self.coordinator.alerts_for(self.same)
+        live = self.coordinator.alerts_for(self.alert_scope)
         alerts = [
             {
                 "id": alert.get("id"),
@@ -226,12 +226,12 @@ class TopAlertSensor(WxAlertsAlertEntity, SensorEntity):
 
     @property
     def native_value(self) -> str:
-        alerts = self.coordinator.alerts_for(self.same)
+        alerts = self.coordinator.alerts_for(self.alert_scope)
         return event_name_for(alerts[0]) if alerts else SEVERITY_NONE
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        alerts = self.coordinator.alerts_for(self.same)
+        alerts = self.coordinator.alerts_for(self.alert_scope)
         top = alerts[0] if alerts else None
         place = self.place
         return {
