@@ -114,6 +114,13 @@ class WxAlertsPlaceEntity(Entity):
         return place.same if place else None
 
     @property
+    def alert_scope(self) -> str | None:
+        """What this place's alerts are filed under: its county on the V1
+        topics, the place itself on the V2 ones (coordinator.scope_for)."""
+        place = self.place
+        return self.coordinator.scope_for(place) if place else None
+
+    @property
     def available(self) -> bool:
         return (
             self.coordinator.connected
@@ -147,10 +154,11 @@ class WxAlertsPlaceEntity(Entity):
             )
 
     @callback
-    def _handle_alerts(self, same: str) -> None:
-        # One signal for every county; the place's county is read at the moment
-        # of the update, so a place whose county changed follows it.
-        if same == self.same:
+    def _handle_alerts(self, scope: str) -> None:
+        # One signal for every county (or, on V2, every place); the place's
+        # scope is read at the moment of the update, so a place whose county
+        # changed follows it.
+        if scope == self.alert_scope:
             self.async_write_ha_state()
 
     @callback
@@ -170,7 +178,7 @@ class WxAlertsAlertEntity(WxAlertsPlaceEntity):
     def available(self) -> bool:
         # A place with no county has no alert feed behind it. Unavailable says
         # that honestly; "off" would claim the county is quiet.
-        return super().available and self.same is not None
+        return super().available and self.alert_scope is not None
 
 
 class WxAlertsStormEntity(WxAlertsPlaceEntity):

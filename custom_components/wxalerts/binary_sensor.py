@@ -89,17 +89,17 @@ class ActiveAlertBinarySensor(WxAlertsAlertEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        return bool(self.coordinator.alerts_for(self.same))
+        return bool(self.coordinator.alerts_for(self.alert_scope))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        alerts = self.coordinator.alerts_for(self.same)
+        alerts = self.coordinator.alerts_for(self.alert_scope)
         return {
             "place_id": self.place_id,
             "same": self.same,
             "alert_count": len(alerts),
             "events": [event_name_for(alert) for alert in alerts],
-            "event_types": sorted(self.coordinator.active_event_keys(self.same)),
+            "event_types": sorted(self.coordinator.active_event_keys(self.alert_scope)),
         }
 
 
@@ -119,11 +119,11 @@ class EventBinarySensor(WxAlertsAlertEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        return self.coordinator.has_event(self.same, self._event.key)
+        return self.coordinator.has_event(self.alert_scope, self._event.key)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        alerts = self.coordinator.alerts_for_event(self.same, self._event.key)
+        alerts = self.coordinator.alerts_for_event(self.alert_scope, self._event.key)
         return {
             "event_type": self._event.key,
             "event": self._event.name,

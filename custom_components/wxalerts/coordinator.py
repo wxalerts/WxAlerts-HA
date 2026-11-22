@@ -35,7 +35,25 @@ from homeassistant.helpers.instance_id import async_get as async_get_instance_id
 from homeassistant.util import dt as dt_util
 from homeassistant.util.ssl import get_default_context
 
+from .alerts_v2 import (
+    alert_key,
+    from_api,
+    merge_detail,
+    parse_message,
+    place_scope,
+)
 from .const import (
+    CONF_TOPICS_VERSION,
+    CONF_V2_INSTANCE,
+    CONF_V2_USER_ID,
+    TOPICS_V1,
+    TOPICS_V2,
+    TOPIC_V2_ALERT_FMT,
+    TOPIC_V2_ALERT_ROOT_FMT,
+    TOPIC_V2_USER_PREFIX_FMT,
+    TOPIC_V2_USER_WILDCARD_FMT,
+    V2_ALERT_END_GRACE_SECONDS,
+    V2_ALERT_STATUS_ACTIVE,
     FC_DAILY,
     FC_HOURLY,
     FC_ISSUED_AT,
@@ -474,7 +492,24 @@ class WxAlertsCoordinator:
 
         self.username: str = entry.data.get(CONF_USERNAME, "")
         self._password: str = entry.data.get(CONF_PASSWORD, "")
-        self.topic_prefix = TOPIC_USER_PREFIX_FMT.format(username=self.username)
+        # Which topic set the API told this instance to use. V1 unless the
+        # registration or a heartbeat said V2 and gave both parts of its names.
+        self.v2_user_id: int | None = None
+        self.v2_instance: str | None = None
+        if (
+            entry.data.get(CONF_TOPICS_VERSION) == TOPICS_V2
+            and isinstance(entry.data.get(CONF_V2_USER_ID), int)
+            and isinstance(entry.data.get(CONF_V2_INSTANCE), str)
+        ):
+            self.v2_user_id = entry.data[CONF_V2_USER_ID]
+            self.v2_instance = entry.data[CONF_V2_INSTANCE]
+        self.topics_version = TOPICS_V2 if self.v2_user_id else TOPICS_V1
+        if self.v2:
+            self.topic_prefix = TOPIC_V2_USER_PREFIX_FMT.format(
+                user_id=self.v2_user_id, instance=self.v2_instance
+            )
+        else:
+            self.topic_prefix = TOPIC_USER_PREFIX_FMT.format(username=self.username)
         # What the update listener compares against, so caching the places
         # list in entry data does not reload the entry on every change.
         self.options_snapshot: dict[str, Any] = dict(entry.options)
@@ -488,10 +523,22 @@ class WxAlertsCoordinator:
         # opposed to the cached copy from the last run.
         self.places_received = False
 
-        # Alert state, keyed county -> full topic -> payload. The ETN is the
-        # last topic level, so two simultaneous hazards for one county keep
-        # distinct keys and a second tornado warning never clobbers the first.
+        # Alert state, keyed scope -> full topic -> payload. On V1 the scope is
+        # the county's SAME code and the ETN is the last topic level, so two
+        # simultaneous hazards for one county keep distinct keys and a second
+        # tornado warning never clobbers the first. On V2 the scope is the
+        # place ("place:<id>") and the key is the alert's own V2 topic.
         self._alerts: dict[str, dict[str, dict[str, Any]]] = {}
+        # V2 only. When each alert was last heard from the feed (monotonic),
+        # the newest message number per alert, the alerts whose end was heard
+        # (so an older API answer cannot bring them back), and a lock and a
+        # counter for the load of the alerts in force.
+        self._v2_seen: dict[tuple[str, str], float] = {}
+        self._v2_seq: dict[str, int] = {}
+        self._v2_ended: dict[str, float] = {}
+        self._v2_detail: dict[str, dict[str, Any] | None] = {}
+        self._v2_load_lock = asyncio.Lock()
+        self._v2_loading = 0
         # Topics we have already fired the HA event for (events fire per new
         # hazard, not per update; CON/EXT on the same topic stays quiet).
         self._event_fired: set[str] = set()
@@ -544,8 +591,33 @@ class WxAlertsCoordinator:
                 seen.append(place.same)
         return seen
 
+    @property
+    def v2(self) -> bool:
+        """Whether this entry reads the MQTT V2 topics."""
+        return self.topics_version == TOPICS_V2
+
     def place(self, place_id: str) -> Place | None:
         return self.places.get(place_id)
+
+    def scope_for(self, place: Place | None) -> str | None:
+        """What a place's alerts are filed under: its place on V2 (every place
+        has alerts, with or without a county), its county on V1 (None without
+        one, because no county feed is behind the place)."""
+        if place is None:
+            return None
+        return place_scope(place.id) if self.v2 else place.same
+
+    @property
+    def alert_scopes(self) -> list[str]:
+        """Every scope with a feed behind it."""
+        if self.v2:
+            return [place_scope(place_id) for place_id in self.places]
+        return self.same_codes
+
+    def places_for_scope(self, scope: str) -> list[Place]:
+        if self.v2:
+            return [p for p in self.places.values() if place_scope(p.id) == scope]
+        return self.places_for_same(scope)
 
     @callback
     def add_place_listener(
@@ -561,6 +633,19 @@ class WxAlertsCoordinator:
         return _remove
 
     def _build_subscriptions(self) -> list[tuple[str, int]]:
+        if self.v2:
+            # Two subscriptions however many places there are: the account's
+            # alerts (already filtered to its places) and this instance's own
+            # topics. No county limit applies.
+            return [
+                (TOPIC_V2_ALERT_FMT.format(user_id=self.v2_user_id), 1),
+                (
+                    TOPIC_V2_USER_WILDCARD_FMT.format(
+                        user_id=self.v2_user_id, instance=self.v2_instance
+                    ),
+                    1,
+                ),
+            ]
         subs: list[tuple[str, int]] = [
             (TOPIC_USER_WILDCARD_FMT.format(username=self.username), 1)
         ]
@@ -601,7 +686,8 @@ class WxAlertsCoordinator:
             self._handle_auth_failed,
         )
         self._client.start()
-        self._schedule_same_lookups()
+        if not self.v2:
+            self._schedule_same_lookups()
         self._unsub_heartbeat = async_track_time_interval(
             self.hass, self._async_heartbeat, timedelta(seconds=HEARTBEAT_SECONDS)
         )
@@ -635,6 +721,11 @@ class WxAlertsCoordinator:
             # A fresh subscription replays the retained set; hold events off
             # until it has landed.
             self._priming_until = time.monotonic() + _PRIMING_SECONDS
+            if self.v2:
+                # V2 alerts are not retained, so nothing replays: read the
+                # alerts in force from the API, now and after every reconnect,
+                # and let the feed carry the changes from here.
+                self._schedule_v2_load(list(self.places.values()))
         async_dispatcher_send(
             self.hass, f"{SIGNAL_CONNECTION}_{self.entry.entry_id}", connected
         )
@@ -760,12 +851,14 @@ class WxAlertsCoordinator:
         from .api import ApiError, InstanceDeactivated, async_send_heartbeat
 
         try:
-            await async_send_heartbeat(self.hass, self.entry)
+            standing = await async_send_heartbeat(self.hass, self.entry)
         except InstanceDeactivated as err:
             self._handle_deactivated(err.reason)
             return
         except ApiError as err:
             _LOGGER.debug("WxAlerts heartbeat failed: %s", err)
+            return
+        if self._follow_topics_version(standing):
             return
         for issue in (ISSUE_REVOKED, ISSUE_OVER_LIMIT, ISSUE_PLAN_LAPSED):
             ir.async_delete_issue(self.hass, DOMAIN, issue)
@@ -783,6 +876,36 @@ class WxAlertsCoordinator:
             if not self.connected:
                 self._handle_auth_failed()
 
+    def _follow_topics_version(self, standing: dict[str, Any]) -> bool:
+        """Move onto the topic set the API now advertises. True if the entry
+        is reloading for it.
+
+        The heartbeat is how an instance already signed in learns that V2 is
+        on (or went off again): the registration only runs when the login is
+        renewed. An API that does not know V2 sends no ``topics_version``,
+        which reads as V1, so rolling the API back moves the instance back.
+        One reload, and only on a change.
+        """
+        from .api import topics_data
+
+        advertised = topics_data(standing)
+        current = {
+            CONF_TOPICS_VERSION: self.topics_version,
+            CONF_V2_USER_ID: self.v2_user_id,
+            CONF_V2_INSTANCE: self.v2_instance,
+        }
+        if advertised == current:
+            return False
+        _LOGGER.info(
+            "The WxAlerts API now uses topics version %s; reconnecting",
+            advertised[CONF_TOPICS_VERSION],
+        )
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**self.entry.data, **advertised}
+        )
+        self.hass.config_entries.async_schedule_reload(self.entry.entry_id)
+        return True
+
     @callback
     def _retry_recover(self, _now: Any) -> None:
         self._handle_auth_failed()
@@ -795,13 +918,20 @@ class WxAlertsCoordinator:
         without this they would freeze at whatever the last message said.
         """
         self._expire_storms()
+        if self.v2:
+            self._expire_v2_alerts()
         async_dispatcher_send(self.hass, f"{SIGNAL_TICK}_{self.entry.entry_id}")
 
     # ===========================================================================
     # Message routing
     # ===========================================================================
     async def _handle_message(self, topic: str, payload: bytes) -> None:
-        if topic.startswith(TOPIC_ALERT_ROOT):
+        if self.v2 and topic.startswith(
+            TOPIC_V2_ALERT_ROOT_FMT.format(user_id=self.v2_user_id)
+        ):
+            self._handle_v2_alert(topic, payload)
+            return
+        if not self.v2 and topic.startswith(TOPIC_ALERT_ROOT):
             parts = topic.split("/")
             if len(parts) >= 6:
                 self._handle_alert(topic, parts[4], payload)
@@ -888,6 +1018,8 @@ class WxAlertsCoordinator:
             self._forget_place_storms(place_id)
             self._conditions.pop(place_id, None)
             self._forecasts.pop(place_id, None)
+            if self.v2:
+                self._forget_v2_scope(place_scope(place_id))
         if new:
             self._remove_stale_place_devices(set(new))
         for place in changed:
@@ -907,7 +1039,8 @@ class WxAlertsCoordinator:
             for listener in list(self._place_listeners):
                 listener(added)
 
-        new_same = set(self.same_codes)
+        new_same = set() if self.v2 else set(self.same_codes)
+        old_same = set() if self.v2 else old_same
         for same in old_same - new_same:
             # No place is in this county any more and its tree is about to be
             # unsubscribed, so no tombstone will ever arrive for what it holds.
@@ -929,7 +1062,18 @@ class WxAlertsCoordinator:
                 self.entry, data={**self.entry.data, CONF_PLACES: cached}
             )
 
-        self._schedule_same_lookups()
+        if self.v2:
+            # A new place, or one that moved, has alerts the feed will not
+            # replay: read them from the API.
+            moved = [
+                place for place in changed
+                if place.id in old and old[place.id].coord_key != place.coord_key
+            ]
+            fresh = [*added, *moved]
+            if fresh and self.connected:
+                self._schedule_v2_load(fresh)
+        else:
+            self._schedule_same_lookups()
 
     def _remove_stale_place_devices(self, keep: set[str]) -> None:
         """Remove place devices this entry owns whose place is not in ``keep``.
@@ -1284,27 +1428,32 @@ class WxAlertsCoordinator:
                 _LOGGER.debug("Retained hazard on %s; not firing an event", topic)
                 return
             for place in self.places_for_same(same):
-                self.hass.bus.async_fire(
-                    EVENT_ALERT,
-                    {
-                        "place_id": place.id,
-                        "place_name": place.name,
-                        "same": same,
-                        "topic": topic,
-                        "id": alert.get("id"),
-                        "vtec": alert.get("vtec"),
-                        "event": alert.get("event"),
-                        "event_type": event_key_for(alert),
-                        "severity": alert.get("severity"),
-                        "urgency": alert.get("urgency"),
-                        "certainty": alert.get("certainty"),
-                        "headline": alert.get("headline"),
-                        "instruction": alert.get("instruction"),
-                        "onset": alert.get("onset"),
-                        "ends": alert.get("ends"),
-                        "action": alert.get("action"),
-                    },
-                )
+                self._fire_alert_event(place, same, topic, alert)
+
+    def _fire_alert_event(
+        self, place: Place, same: str | None, topic: str, alert: dict[str, Any]
+    ) -> None:
+        self.hass.bus.async_fire(
+            EVENT_ALERT,
+            {
+                "place_id": place.id,
+                "place_name": place.name,
+                "same": same,
+                "topic": topic,
+                "id": alert.get("id"),
+                "vtec": alert.get("vtec"),
+                "event": alert.get("event"),
+                "event_type": event_key_for(alert),
+                "severity": alert.get("severity"),
+                "urgency": alert.get("urgency"),
+                "certainty": alert.get("certainty"),
+                "headline": alert.get("headline"),
+                "instruction": alert.get("instruction"),
+                "onset": alert.get("onset"),
+                "ends": alert.get("ends"),
+                "action": alert.get("action"),
+            },
+        )
 
     def _dispatch_alerts(self, same: str) -> None:
         async_dispatcher_send(
@@ -1330,7 +1479,7 @@ class WxAlertsCoordinator:
             return
         self._active_events[same] = current
 
-        priming = time.monotonic() < self._priming_until
+        priming = time.monotonic() < self._priming_until or self._v2_loading > 0
         for key in current - previous:
             if priming:
                 _LOGGER.debug("Retained hazard %s on %s; not firing", key, same)
@@ -1346,13 +1495,13 @@ class WxAlertsCoordinator:
             (alert for alert in self.alerts_for(same) if event_key_for(alert) == key),
             None,
         )
-        for place in self.places_for_same(same):
+        for place in self.places_for_scope(same):
             self.hass.bus.async_fire(
                 EVENT_HAZARD,
                 {
                     "place_id": place.id,
                     "place_name": place.name,
-                    "same": same,
+                    "same": place.same,
                     "event_type": key,
                     "event": event_name_for(alert) if alert else key,
                     "action": action,
@@ -1362,6 +1511,230 @@ class WxAlertsCoordinator:
                     "vtec": alert.get("vtec") if alert else None,
                 },
             )
+
+
+    # ===========================================================================
+    # MQTT V2 alerts
+    # ===========================================================================
+    def _places_named(self, labels: list[str]) -> list[Place]:
+        """The places a V2 message names. It carries labels, not ids, so a
+        label two places share names both."""
+        wanted = set(labels)
+        return [place for place in self.places.values() if place.name in wanted]
+
+    def _forget_v2_scope(self, scope: str) -> None:
+        """A place left the account: drop its alerts."""
+        county = self._alerts.pop(scope, None)
+        for key in list(county or {}):
+            self._event_fired.discard(f"{scope}|{key}")
+            self._v2_seen.pop((scope, key), None)
+        if county:
+            self._dispatch_alerts(scope)
+
+    def _v2_remove(self, key: str, scopes: set[str]) -> None:
+        for scope in scopes:
+            county = self._alerts.get(scope)
+            if county is not None and county.pop(key, None) is not None:
+                self._event_fired.discard(f"{scope}|{key}")
+                self._v2_seen.pop((scope, key), None)
+                self._dispatch_alerts(scope)
+
+    def _handle_v2_alert(self, topic: str, payload: bytes) -> None:
+        """One message on ``V2/<user id>/NWS/<office>/<short id>``.
+
+        Not retained, so there is no tombstone: the end of an alert is a
+        message with ``status`` cancelled or expired. A cancellation names the
+        places it releases, and the alert stays on any other place that holds
+        it. An active message sets the alert's places exactly: a place the
+        alert no longer covers loses it. The numeric id and instruction the
+        message leaves out come from the API before an alert is first shown.
+        """
+        if not payload:
+            return
+        try:
+            decoded = json.loads(payload)
+        except ValueError:
+            _LOGGER.warning("Undecodable alert payload on %s", topic)
+            return
+        alert = parse_message(decoded)
+        if alert is None:
+            _LOGGER.debug("Ignoring a malformed alert message on %s", topic)
+            return
+        short_id = alert["short_id"]
+        seq = self._v2_seq[short_id] = self._v2_seq.get(short_id, 0) + 1
+        targets = self._places_named(alert["places"])
+        if alert["status"] != V2_ALERT_STATUS_ACTIVE:
+            self._v2_ended[short_id] = time.monotonic()
+            if alert["places"]:
+                scopes = {place_scope(place.id) for place in targets}
+            else:
+                # Nothing is named: the alert is over as a whole.
+                scopes = {s for s, county in self._alerts.items() if topic in county}
+            self._v2_remove(topic, scopes)
+            return
+        self._v2_ended.pop(short_id, None)
+        self.entry.async_create_background_task(
+            self.hass,
+            self._async_apply_v2_alert(topic, alert, targets, seq),
+            f"wxalerts_alert_{short_id}",
+        )
+
+    async def _async_alert_detail(self, short_id: str, refresh: bool) -> dict[str, Any] | None:
+        """The API's copy of an alert, or None. Cached per alert; a message
+        that changes the alert asks for a fresh one."""
+        from .api import ApiError, async_alert_page
+
+        if not refresh and short_id in self._v2_detail:
+            return self._v2_detail[short_id]
+        try:
+            page = await async_alert_page(self.hass, short_id)
+        except ApiError as err:
+            _LOGGER.debug("Could not read alert %s from the API: %s", short_id, err)
+            return self._v2_detail.get(short_id)
+        self._v2_detail[short_id] = page
+        return page
+
+    async def _async_apply_v2_alert(
+        self, topic: str, alert: dict[str, Any], targets: list[Place], seq: int
+    ) -> None:
+        detail = await self._async_alert_detail(alert["short_id"], refresh=True)
+        if self._v2_seq.get(alert["short_id"]) != seq:
+            # A newer message (or the end of this alert) arrived meanwhile.
+            return
+        self._store_v2_alert(topic, merge_detail(alert, detail), targets)
+
+    def _store_v2_alert(self, key: str, alert: dict[str, Any], targets: list[Place]) -> None:
+        """File an active alert under each of its places, and take it off the
+        places that held it and no longer do. Fires ``wxalerts_alert`` for a
+        place that did not have it, once, outside the priming window."""
+        wanted = {place_scope(place.id) for place in targets}
+        self._v2_remove(
+            key, {scope for scope, county in self._alerts.items() if key in county} - wanted
+        )
+        now = time.monotonic()
+        for place in targets:
+            scope = place_scope(place.id)
+            county = self._alerts.setdefault(scope, {})
+            is_new = key not in county
+            county[key] = alert
+            self._v2_seen[(scope, key)] = now
+            self._dispatch_alerts(scope)
+            fired = f"{scope}|{key}"
+            if is_new and fired not in self._event_fired:
+                self._event_fired.add(fired)
+                if now < self._priming_until or self._v2_loading > 0:
+                    continue
+                self._fire_alert_event(place, place.same, key, alert)
+
+    def _expire_v2_alerts(self) -> None:
+        """Drop an alert a long while after its end. Nothing on V2 is
+        retained, so an end that was never heard would otherwise stay until
+        the next reconnect."""
+        now = time.time()
+        for scope, county in list(self._alerts.items()):
+            for key, alert in list(county.items()):
+                end = _parse_time(alert.get("ends")) or _parse_time(alert.get("expires"))
+                if end is not None and now - end > V2_ALERT_END_GRACE_SECONDS:
+                    _LOGGER.debug("Alert %s on %s expired", key, scope)
+                    self._v2_remove(key, {scope})
+
+    def _schedule_v2_load(self, places: list[Place]) -> None:
+        if not places:
+            return
+        self.entry.async_create_background_task(
+            self.hass, self._async_load_v2_alerts(places), "wxalerts_load_alerts"
+        )
+
+    async def _async_load_v2_alerts(self, places: list[Place], attempt: int = 0) -> None:
+        """Read the alerts in force at these places from the API and make them
+        the state, then leave the feed to change it.
+
+        Silent: what is already in force is current state, not news, so no
+        event fires for it (the same reason the V1 priming window exists). An
+        alert the state holds from before that the API no longer lists is
+        removed; one the feed said something about during the load is kept, and
+        one whose end the feed announced during the load is not brought back.
+        A place the API could not answer for keeps what it had and is tried
+        again a little later.
+        """
+        from .api import ApiError, async_alerts_at
+
+        async with self._v2_load_lock:
+            started = time.monotonic()
+            self._v2_loading += 1
+            failed: list[Place] = []
+            try:
+                snapshot: dict[str, list[dict[str, Any]]] = {}
+                for place in places:
+                    if place.id not in self.places or place.coord_key is None:
+                        continue
+                    try:
+                        snapshot[place.id] = await async_alerts_at(
+                            self.hass, place.latitude, place.longitude
+                        )
+                    except ApiError as err:
+                        _LOGGER.debug("Could not load alerts for %s: %s", place.name, err)
+                        failed.append(place)
+                details: dict[str, dict[str, Any] | None] = {}
+                for items in snapshot.values():
+                    for item in items:
+                        short_id = item.get("short_id")
+                        if isinstance(short_id, str) and short_id not in details:
+                            details[short_id] = await self._async_alert_detail(
+                                short_id, refresh=False
+                            )
+                for place_id, items in snapshot.items():
+                    if place_id in self.places:
+                        self._apply_v2_snapshot(place_id, items, details, started)
+            finally:
+                self._v2_loading -= 1
+        if failed and attempt < 3 and self.connected:
+            delay = (30, 120, 300)[attempt]
+
+            @callback
+            def _retry(_now: Any) -> None:
+                self.entry.async_create_background_task(
+                    self.hass,
+                    self._async_load_v2_alerts(failed, attempt + 1),
+                    "wxalerts_load_alerts_retry",
+                )
+
+            self.entry.async_on_unload(async_call_later(self.hass, delay, _retry))
+
+    def _apply_v2_snapshot(
+        self,
+        place_id: str,
+        items: list[dict[str, Any]],
+        details: dict[str, dict[str, Any] | None],
+        started: float,
+    ) -> None:
+        scope = place_scope(place_id)
+        county = self._alerts.setdefault(scope, {})
+        listed: dict[str, dict[str, Any]] = {}
+        for item in items:
+            alert = from_api(item, details.get(item.get("short_id")))
+            if alert is None or alert["status"] != V2_ALERT_STATUS_ACTIVE:
+                continue
+            if self._v2_ended.get(alert["short_id"], 0.0) >= started:
+                continue
+            listed[alert_key(self.v2_user_id or 0, alert)] = alert
+        changed = False
+        for key in list(county):
+            heard = self._v2_seen.get((scope, key), 0.0)
+            if key not in listed and heard < started:
+                county.pop(key)
+                self._v2_seen.pop((scope, key), None)
+                self._event_fired.discard(f"{scope}|{key}")
+                changed = True
+        for key, alert in listed.items():
+            if key in county:
+                continue
+            county[key] = alert
+            self._v2_seen[(scope, key)] = time.monotonic()
+            self._event_fired.add(f"{scope}|{key}")
+            changed = True
+        if changed:
+            self._dispatch_alerts(scope)
 
     # ===========================================================================
     # Alert state the entities read
@@ -1411,6 +1784,7 @@ class WxAlertsCoordinator:
     # ===========================================================================
     def diagnostics(self) -> dict[str, Any]:
         return {
+            "topics_version": self.topics_version,
             "connected": self.connected,
             "places_received": self.places_received,
             "place_count": len(self.places),

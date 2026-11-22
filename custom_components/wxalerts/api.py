@@ -10,6 +10,7 @@ which is also how a rejected broker password is recovered.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from http import HTTPStatus
 from typing import Any
@@ -24,11 +25,16 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.instance_id import async_get as async_get_instance_id
 
 from .const import (
+    API_ALERT_PAGE_URL_FMT,
+    API_ALERTS_AT_URL,
     API_HEARTBEAT_URL_FMT,
     API_INSTANCES_URL,
     API_TIMEOUT_SECONDS,
     CONF_INSTANCE_ID,
     CONF_TOKEN,
+    CONF_TOPICS_VERSION,
+    CONF_V2_INSTANCE,
+    CONF_V2_USER_ID,
     DOMAIN,
     HA_OAUTH_CLIENT_ID,
     OAUTH_AUTHORIZE_URL,
@@ -36,6 +42,8 @@ from .const import (
     OAUTH_TOKEN_URL,
     PRICING_URL,
     REASON_REVOKED,
+    TOPICS_V1,
+    TOPICS_V2,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -207,13 +215,95 @@ def _error_code(payload: dict[str, Any]) -> str:
     return str(payload.get("code") or payload.get("error") or "")
 
 
+# The instance key goes into topic filters, so only what the API makes
+# (the login's key, lowercase letters and digits) is accepted: a wildcard or a
+# slash in it would widen the subscription.
+_INSTANCE_KEY = re.compile(r"^[a-z0-9]{1,40}$")
+
+
+def topics_data(payload: dict[str, Any]) -> dict[str, Any]:
+    """The entry fields that say which topic set to use.
+
+    V2 only when the API says so completely: ``topics_version`` 2 with the
+    account id and the instance key. Anything else, including an API that has
+    never heard of V2, is V1.
+    """
+    user_id = payload.get(CONF_V2_USER_ID)
+    instance = payload.get(CONF_V2_INSTANCE)
+    if (
+        payload.get(CONF_TOPICS_VERSION) == TOPICS_V2
+        and isinstance(user_id, int)
+        and not isinstance(user_id, bool)
+        and user_id > 0
+        and isinstance(instance, str)
+        and _INSTANCE_KEY.match(instance)
+    ):
+        return {
+            CONF_TOPICS_VERSION: TOPICS_V2,
+            CONF_V2_USER_ID: user_id,
+            CONF_V2_INSTANCE: instance,
+        }
+    return {CONF_TOPICS_VERSION: TOPICS_V1, CONF_V2_USER_ID: None, CONF_V2_INSTANCE: None}
+
+
 def broker_data(registration: dict[str, Any], instance_id: str | None = None) -> dict[str, Any]:
     """The entry fields a registration response fills in."""
     return {
         CONF_USERNAME: registration["username"],
         CONF_PASSWORD: registration["password"],
         CONF_INSTANCE_ID: registration.get("instance_id") or instance_id,
+        **topics_data(registration),
     }
+
+
+async def _get_public(
+    hass: HomeAssistant, url: str, params: dict[str, Any] | None = None
+) -> tuple[int, Any]:
+    """GET a public, anonymous API route. Raises ApiUnavailable when the API
+    cannot be reached."""
+    session = async_get_clientsession(hass)
+    try:
+        async with session.get(
+            url,
+            params=params,
+            headers={"Accept": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=API_TIMEOUT_SECONDS),
+        ) as response:
+            try:
+                return response.status, await response.json(content_type=None)
+            except ValueError:
+                return response.status, None
+    except (aiohttp.ClientError, TimeoutError) as err:
+        raise ApiUnavailable(str(err)) from err
+
+
+async def async_alerts_at(hass: HomeAssistant, lat: float, lon: float) -> list[dict[str, Any]]:
+    """The active alerts covering a point (``GET /alerts/at``), newest first.
+
+    The alerts in force right now, which V2 does not retain on the broker. An
+    empty list means nothing is in effect there. Raises ApiUnavailable.
+    """
+    status, payload = await _get_public(
+        hass, API_ALERTS_AT_URL, {"lat": round(lat, 4), "lon": round(lon, 4)}
+    )
+    if status == HTTPStatus.OK and isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    raise ApiUnavailable(f"alerts at point: HTTP {status}")
+
+
+async def async_alert_page(hass: HomeAssistant, short_id: str) -> dict[str, Any] | None:
+    """One alert by its short id (``GET /alerts/page/{short_id}``): the fields
+    a V2 message leaves out (description, instruction, the numeric id) and the
+    full geometry. None when the alert is unknown or past retention. Raises
+    ApiUnavailable."""
+    if not re.fullmatch(r"[0-9A-Za-z]{8}", short_id):
+        return None
+    status, payload = await _get_public(hass, API_ALERT_PAGE_URL_FMT.format(short_id=short_id))
+    if status == HTTPStatus.OK and isinstance(payload, dict):
+        return payload
+    if status in (HTTPStatus.NOT_FOUND, HTTPStatus.GONE):
+        return None
+    raise ApiUnavailable(f"alert {short_id}: HTTP {status}")
 
 
 async def _with_token(hass: HomeAssistant, entry: ConfigEntry, call):

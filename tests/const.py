@@ -329,3 +329,82 @@ def forecast(issued_age_seconds: float = 600.0, days: int = 7, hours: int = 48) 
         "daily": daily,
         "hourly": hourly,
     }
+
+
+# ===========================================================================
+# MQTT V2
+# ===========================================================================
+V2_USER_ID = 42
+V2_INSTANCE = "k7x2q9mfw3"
+V2_PREFIX = f"V2/{V2_USER_ID}/HA/{V2_INSTANCE}/"
+V2_TOPIC_PLACES = f"{V2_PREFIX}places"
+V2_TOPIC_STATUS = f"{V2_PREFIX}status"
+V2_TORNADO_ID = "52HcPf5Z"
+V2_TOPIC_TORNADO = f"V2/{V2_USER_ID}/NWS/KMOB/{V2_TORNADO_ID}"
+V2_SEVERE_ID = "1QgsckYl"
+V2_TOPIC_SEVERE = f"V2/{V2_USER_ID}/NWS/KMOB/{V2_SEVERE_ID}"
+
+
+def v2_alert(short_id: str = V2_TORNADO_ID, **overrides) -> dict:
+    """A V2 alert message, contract section 6: short id, status and action,
+    place labels, minimized geometry, no description or instruction."""
+    return {
+        "v": 2,
+        "id": short_id,
+        "url": f"https://wxalerts.org/alerts/{short_id}/",
+        "status": "active",
+        "action": "NEW",
+        "event": "Tornado Warning",
+        "office": "KMOB",
+        "vtec": "KMOB.TO.W.0012.2026",
+        "phenomena": "TO",
+        "significance": "W",
+        "severity": "Extreme",
+        "urgency": "Immediate",
+        "certainty": "Observed",
+        "headline": "TORNADO WARNING IN EFFECT UNTIL 345 PM CDT",
+        "issued_at": "2026-08-11T20:15:00Z",
+        "onset": "2026-08-11T20:15:00Z",
+        "expires": "2026-08-11T20:45:00Z",
+        "ends": "2026-08-11T20:45:00Z",
+        "ugc": ["FLC113"],
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+                [[-87.10, 30.60], [-87.00, 30.60], [-87.00, 30.70], [-87.10, 30.70],
+                 [-87.10, 30.60]]
+            ],
+        },
+        "geometry_source": "polygon",
+        "places": ["Home"],
+        "published_at": "2026-08-11T20:15:07Z",
+        **overrides,
+    }
+
+
+def api_alert(numeric_id: int = 1234, short_id: str = V2_TORNADO_ID, **overrides) -> dict:
+    """The API's alert object (GET /alerts/page/{short_id}, or one row of
+    GET /alerts/at, which has no geometry)."""
+    return {
+        "id": numeric_id,
+        "short_id": short_id,
+        "vtec_key": "KMOB.TO.W.0012.2026",
+        "event": "Tornado Warning",
+        "office": "KMOB",
+        "phenomena": "TO",
+        "significance": "W",
+        "status": "active",
+        "severity": "Extreme",
+        "urgency": "Immediate",
+        "certainty": "Observed",
+        "issued_at": "2026-08-11T20:15:00Z",
+        "onset": "2026-08-11T20:15:00Z",
+        "expires": "2026-08-11T20:45:00Z",
+        "ends": "2026-08-11T20:45:00Z",
+        "ugc": ["FLC113"],
+        "headline": "TORNADO WARNING IN EFFECT UNTIL 345 PM CDT",
+        "description": "At 315 PM CDT, a severe thunderstorm capable of...",
+        "instruction": "TAKE COVER NOW! Move to a basement...",
+        "geom_source": "polygon",
+        **overrides,
+    }

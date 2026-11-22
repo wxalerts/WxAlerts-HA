@@ -64,6 +64,30 @@ MAX_SUBSCRIPTIONS = 18
 TOPIC_SAME_FMT = "wxalerts/nws/v1/same/{same}/#"
 TOPIC_ALERT_ROOT = "wxalerts/nws/v1/same/"
 
+# MQTT V2 topics (the API advertises them with `topics_version` 2, see api.py
+# `topics_data`; without that the V1 topics above are used). Alerts are the
+# account's own, filtered to its places by the fan-out worker, so there is no
+# county subtree to follow: one subscription for the alerts and one for the
+# instance's own topics, which keep the V1 subtopics (places, status, storms,
+# conditions, forecast).
+TOPICS_V1 = 1
+TOPICS_V2 = 2
+TOPIC_V2_ALERT_FMT = "V2/{user_id}/NWS/#"
+TOPIC_V2_ALERT_ROOT_FMT = "V2/{user_id}/NWS/"
+TOPIC_V2_USER_PREFIX_FMT = "V2/{user_id}/HA/{instance}/"
+TOPIC_V2_USER_WILDCARD_FMT = "V2/{user_id}/HA/{instance}/#"
+# V2 alerts are not retained and carry no description or instruction. They are
+# read from the public API: the ones in force when the feed connects, and the
+# detail of each alert the feed announces.
+API_ALERTS_AT_URL = f"{API_BASE_URL}/alerts/at"
+API_ALERT_PAGE_URL_FMT = f"{API_BASE_URL}/alerts/page/{{short_id}}"
+# V2 alert payload (mqtt-fanout docs/contract.md section 6).
+V2_ALERT_STATUS_ACTIVE = "active"
+# How long past its end an alert whose cancel never arrived stays on screen.
+V2_ALERT_END_GRACE_SECONDS = 3600
+# Alert state is filed per place on V2: "place:<place id>".
+V2_SCOPE_PREFIX = "place:"
+
 # Per-user tree. One wildcard subscription covers places, status and storm
 # cells, which keeps the subscription budget for county alert trees.
 TOPIC_USER_PREFIX_FMT = "wxalerts/u/{username}/"
@@ -280,6 +304,13 @@ CONF_EVENT_SENSORS = "event_sensors"
 # Legacy: a single switch for the six hardcoded phenomenon buckets (0.3.x).
 # Read only by the 0.x migration, never written.
 CONF_PHENOMENON_SENSORS = "phenomenon_sensors"
+
+# Which topic set the API told this instance to use (1 or 2), and the account
+# id and instance key the V2 topics are built from. Written by the
+# registration and refreshed by the heartbeat.
+CONF_TOPICS_VERSION = "topics_version"
+CONF_V2_USER_ID = "v2_user_id"
+CONF_V2_INSTANCE = "v2_instance"
 
 # Config entry schema version. 1 was every 0.x release (zones, lightning, the
 # public login); 2 is places, a wxalerts.org sign-in and a per-instance

@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.1.0
+
+The newer MQTT topic set (V2), used when the WxAlerts API advertises it. Nothing
+changes until then: against the API as it is today the integration keeps using
+the 1.0.0 topics.
+
+- **V2 topics.** When the registration or a heartbeat carries
+  `topics_version: 2`, the integration subscribes to `V2/<account id>/NWS/#` and
+  `V2/<account id>/HA/<instance>/#` (two subscriptions, no county limit) and
+  reconnects once to switch. It moves back by itself if the API stops
+  advertising V2.
+- **Alerts belong to places.** A place's alerts are the ones the feed names for
+  it, so two places in one county no longer share an alert, a partial
+  cancellation only removes the alert from the places it releases, and a place
+  with no county now gets alerts and hazard triggers.
+- **The alerts in force are read from the API.** V2 alerts are not retained, so
+  on start, after every reconnect and for a newly added place the integration
+  calls `GET /alerts/at`, silently, and then applies the feed's updates. An
+  alert whose cancel was never heard is dropped an hour after its end time.
+- **Instruction and numeric id.** A V2 alert message has neither, so each alert
+  is also fetched from `GET /alerts/page/<short id>`. If that fails the alert
+  is shown without them until its next update. An alert loaded at start-up has
+  no VTEC `action` until the feed updates it.
+- Diagnostics report the topic set and redact the account id and instance key.
+
 ## 1.0.0
 
 WxAlerts moves from Home Assistant zones to the places on your WxAlerts
