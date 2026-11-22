@@ -30,6 +30,8 @@ from typing import Any
 from .const import V2_ALERT_STATUS_ACTIVE, V2_SCOPE_PREFIX
 
 STATUSES = ("active", "cancelled", "expired")
+# The topic segment of an alert whose office is not a four letter id.
+OTHER_OFFICE = "OTHER"
 
 # Copied through unchanged from a V2 message.
 _COPIED = (
@@ -58,6 +60,37 @@ def place_scope(place_id: str) -> str:
     """The key a place's alerts are filed under on V2. Not a SAME code (six
     digits), so it can never collide with a V1 county key."""
     return f"{V2_SCOPE_PREFIX}{place_id}"
+
+
+def numeric_id(value: Any) -> int | None:
+    """The alert's numeric id as an int, or None.
+
+    ``GET /alerts/at`` sends it as a number and ``GET /alerts/page/{short_id}``
+    as a string of digits (it is a 64 bit id, and the page is read by
+    browsers), so both are accepted.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 19:
+        return int(value) or None
+    return None
+
+
+def office_segment(office: Any) -> str:
+    """The office part of an alert's topic: the four letter office id, or
+    ``OTHER`` for anything else, which is what the feed publishes under
+    (mqtt-fanout docs/contract.md section 1)."""
+    if (
+        isinstance(office, str)
+        and len(office) == 4
+        and office.isascii()
+        and office.isalpha()
+        and office.isupper()
+    ):
+        return office
+    return OTHER_OFFICE
 
 
 def parse_message(raw: Any) -> dict[str, Any] | None:
@@ -99,8 +132,8 @@ def merge_detail(alert: dict[str, Any], page: dict[str, Any] | None) -> dict[str
     if not page:
         return alert
     merged = dict(alert)
-    numeric = page.get("id")
-    if isinstance(numeric, int) and not isinstance(numeric, bool):
+    numeric = numeric_id(page.get("id"))
+    if numeric is not None:
         merged["id"] = numeric
     for key in ("instruction", "description"):
         if page.get(key) is not None:
@@ -122,9 +155,8 @@ def from_api(item: dict[str, Any], page: dict[str, Any] | None = None) -> dict[s
     if not isinstance(short_id, str) or not short_id:
         return None
     source = {**item, **(page or {})}
-    numeric = source.get("id")
     return {
-        "id": numeric if isinstance(numeric, int) and not isinstance(numeric, bool) else None,
+        "id": numeric_id(source.get("id")),
         "short_id": short_id,
         "url": f"https://wxalerts.org/alerts/{short_id}/",
         "vtec": source.get("vtec_key"),
@@ -155,4 +187,4 @@ def alert_key(user_id: int, alert: dict[str, Any]) -> str:
     """The alert's identity in the state: the topic the feed publishes it on,
     ``V2/<user id>/NWS/<office>/<short id>``, which is also how an alert loaded
     from the API is matched with a later message about it."""
-    return f"V2/{user_id}/NWS/{alert.get('office')}/{alert['short_id']}"
+    return f"V2/{user_id}/NWS/{office_segment(alert.get('office'))}/{alert['short_id']}"

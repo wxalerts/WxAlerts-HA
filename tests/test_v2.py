@@ -15,6 +15,8 @@ from custom_components.wxalerts.alerts_v2 import (
     alert_key,
     from_api,
     merge_detail,
+    numeric_id,
+    office_segment,
     parse_message,
     place_scope,
 )
@@ -199,6 +201,31 @@ def test_a_message_maps_onto_the_fields_the_entities_read():
 )
 def test_a_malformed_message_is_none(raw):
     assert parse_message(raw) is None
+
+
+def test_the_alert_page_sends_the_numeric_id_as_a_string():
+    """GET /alerts/page/{short_id} sends ``id`` as a string of digits and
+    GET /alerts/at as a number; both end up as the same int."""
+    page = {**api_alert(numeric_id=777), "id": "34320945"}
+    assert merge_detail(parse_message(v2_alert()), page)["id"] == 34320945
+    assert from_api(api_alert(numeric_id=34320945), page)["id"] == 34320945
+    assert from_api(api_alert(numeric_id=34320945))["id"] == 34320945
+
+
+@pytest.mark.parametrize("value", [None, True, 0, -4, "", "12a", "١٢", "9" * 20, 1.5, [1]])
+def test_a_bad_numeric_id_is_none(value):
+    assert numeric_id(value) is None
+
+
+@pytest.mark.parametrize(
+    ("office", "segment"),
+    [("KMOB", "KMOB"), ("PAFC", "PAFC"), ("NWS Mobile AL", "OTHER"), ("kmob", "OTHER"),
+     ("KMO", "OTHER"), ("KM0B", "OTHER"), (None, "OTHER"), ("", "OTHER")],
+)
+def test_an_api_alert_is_keyed_by_the_topic_the_feed_uses(office, segment):
+    alert = from_api(api_alert(office=office))
+    assert alert_key(7, alert) == f"V2/7/NWS/{segment}/{alert['short_id']}"
+    assert office_segment(office) == segment
 
 
 def test_the_api_supplies_the_numeric_id_and_instruction():
