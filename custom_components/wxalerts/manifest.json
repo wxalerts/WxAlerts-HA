@@ -1,6 +1,9 @@
 {
   "domain": "wxalerts",
   "name": "WxAlerts",
+  "categories": [
+    "weather_alerts"
+  ],
   "codeowners": [
     "@wxalerts",
     "@kn4oqw-clint"
@@ -15,5 +18,5 @@
     "aiomqtt>=2.3.0"
   ],
   "single_config_entry": true,
-  "version": "1.1.0"
+  "version": "1.1.1"
 }

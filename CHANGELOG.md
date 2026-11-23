@@ -1,10 +1,19 @@
 # Changelog
 
+## 1.1.1
+
+No change to how the integration works.
+
+- The manifest names the integration's category (Weather & alerts), which the
+  Home Assistant Marketplace uses when people browse by category.
+- The install steps in the README are for the Marketplace, which replaced HACS
+  in Home Assistant 2026.11.
+
 ## 1.1.0
 
-The newer MQTT topic set (V2), used when the WxAlerts API advertises it. Nothing
-changes until then: against the API as it is today the integration keeps using
-the 1.0.0 topics.
+**Update before Jan 1, 2027.** The 1.0.0 topics stop that day. This release reads the
+topic set that replaces them (MQTT V2), which the WxAlerts API now advertises. There is
+nothing to set up: update, restart Home Assistant, and the integration switches by itself.
 
 - **V2 topics.** When the registration or a heartbeat carries
   `topics_version: 2`, the integration subscribes to `V2/<account id>/NWS/#` and
