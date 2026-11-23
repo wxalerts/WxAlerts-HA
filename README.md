@@ -1,6 +1,6 @@
 # WxAlerts for Home Assistant
 
-[![HACS Custom Repository](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz)
+[![Open your Home Assistant instance and open a repository in the Marketplace.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=wxalerts&repository=WxAlerts-HA&category=integration)
 [![GitHub Release](https://img.shields.io/github/release/wxalerts/WxAlerts-HA.svg)](https://github.com/wxalerts/WxAlerts-HA/releases)
 [![Validate](https://github.com/wxalerts/WxAlerts-HA/actions/workflows/validate.yml/badge.svg)](https://github.com/wxalerts/WxAlerts-HA/actions/workflows/validate.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -40,19 +40,31 @@ Each place gets:
 
 ## Installation
 
-### 1. Install with HACS
+### 1. Install from the Marketplace
 
-1. In HACS, open the menu and choose **Custom repositories**.
-2. Add `https://github.com/wxalerts/WxAlerts-HA` with category
-   **Integration**.
-3. Install **WxAlerts** and restart Home Assistant.
+Home Assistant 2026.11 and newer has the Marketplace built in, where it
+replaced HACS.
+
+1. Open **Settings**, **Marketplace** and choose **Add from link**, or use
+   [this link](https://my.home-assistant.io/redirect/hacs_repository/?owner=wxalerts&repository=WxAlerts-HA&category=integration),
+   which opens the repository in your own Home Assistant.
+2. Enter `wxalerts/WxAlerts-HA` and choose **Add**. The first time you add a
+   repository from a link, Home Assistant asks you to connect a GitHub
+   account. That connection only reads public information.
+3. Open **WxAlerts** in the list and choose **Install**. The setup in step 2
+   below opens by itself, with no restart.
+
+On Home Assistant 2026.10 and older, use HACS: open the menu, choose **Custom
+repositories**, add `https://github.com/wxalerts/WxAlerts-HA` with category
+**Integration**, install **WxAlerts** and restart Home Assistant.
 
 Manual install: copy `custom_components/wxalerts` into your
 `config/custom_components` folder and restart.
 
 ### 2. Add the integration and sign in
 
-**Settings**, **Devices & services**, **Add integration**, **WxAlerts**.
+After a Marketplace install the setup is already open. Otherwise: **Settings**,
+**Devices & services**, **Add integration**, **WxAlerts**.
 A browser window opens on wxalerts.org: sign in with your WxAlerts account
 and approve. That is all. The integration registers this Home Assistant with
 your account, gets its own broker login, and creates one device per place.
